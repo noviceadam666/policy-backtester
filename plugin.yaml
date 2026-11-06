@@ -1,0 +1,24 @@
+name: policy-backtester
+version: 0.2.0
+description: "Backtest guardrail policies against your agents' real tool-call history, then shadow and enforce them."
+author: Novice Adam
+requires_hermes: ">=0.22.5"
+provides_tools: []
+provides_hooks:
+  - pre_tool_call
+provides_middleware: []
+config_schema:
+  mode:
+    type: string
+    choices: [off, shadow, enforce]
+    default: "off"
+    label: Live mode
+    description: "off does nothing; shadow logs what the promoted policy would do; enforce blocks or asks. Set it with hermes backtest shadow / enforce / off, which backtest the policy first."
+  policy:
+    type: string
+    label: Promoted policy
+    description: "The policy copy that hermes backtest shadow or enforce installed in this profile's backtest/policies folder."
+  policy_sha256:
+    type: string
+    label: Policy hash
+    description: "The promoted policy's hash. The hook refuses a policy file whose rules changed after promotion."

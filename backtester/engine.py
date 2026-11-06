@@ -1,7 +1,9 @@
 """The backtest: replay indexed calls through the evaluator, then compare policy versions.
 
 Each call is replayed on its own. The replay can say a call would have been stopped, but not what the
-agent would have done next, so counts after the first stop in a session are upper bounds.
+agent would have done next. A session's or run's first stop is exact, since nothing before it was
+stopped, so caught sessions and runs hit are exact. Calls after it are marked ``after_first_stop``, and
+call counts that include them are upper bounds.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ class CallHit:
     rule_ids: tuple[str, ...]
     outcome: str
     run_key: str = ""
+    after_first_stop: bool = False
 
 
 @dataclass
@@ -168,6 +171,7 @@ def run_backtest(
                     row["job_kind"], row["profile"], row["job_id"], row["job_name"],
                     _completed_runs(index, row["profile"], row["job_id"], since, until),
                 )
+            hit.after_first_stop = any(c.run_key == hit.run_key for c in breaks[key].calls)
             breaks[key].calls.append(hit)
         else:
             key = (row["profile"], row["session_id"])
@@ -176,6 +180,7 @@ def run_backtest(
                     row["profile"], row["session_id"], row["source"], row["platform"], row["title"],
                     row["started_at"], row["job_name"],
                 )
+            hit.after_first_stop = bool(incidents[key].calls)
             incidents[key].calls.append(hit)
             for rule_id in verdict.rule_ids:
                 stats[rule_id].incident_sessions.add(key)

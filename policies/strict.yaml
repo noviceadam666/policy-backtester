@@ -1,0 +1,33 @@
+# Strict: refined, plus a rule that asks when a command that reads or copies files has a target the shell
+# would expand (a variable, a wildcard or a brace list), so the path rules can't see it. Backtest and shadow
+# it before you enforce it: it's noisier than refined by design.
+rules:
+  - id: no-rm-rf
+    tool: terminal
+    command: 'rm\s+-rf'
+    unless_command: '^\s*rm\s+-rf\s+\./cache/\*\s*$'
+    action: block
+    message: Recursive deletes are blocked.
+  - id: no-force-push
+    tool: terminal
+    command: 'git\s+push\s+(-f|--force)'
+    unless_command: '^\s*git\s+push\s+(-f|--force)\s+origin\s+scratch/[\w./-]+\s*$'
+    action: block
+    message: Force-push is blocked.
+  - id: no-secret-reads
+    tool: [read_file, terminal]
+    path: ['**/.env', '**/config/vendor-api.yaml', '**/*.pem', '~/.ssh/**']
+    action: block
+    message: Secret files are off limits.
+  - id: no-shell-uploads
+    tool: terminal
+    command: '(curl|wget)\s(?:[^|;&]*\s)?(-d|--data|-F|--form|-T|--upload-file|--post-data|--post-file)'
+    action: block
+    message: Uploads from the shell are blocked.
+  - id: ask-unresolved-reads
+    tool: terminal
+    command: '(^|[\s;&|(])(cat|less|more|head|tail|cp|scp|rsync|tar|zip|base64|xxd|od|strings)\s'
+    path: ['**/.env', '**/config/vendor-api.yaml', '**/*.pem', '~/.ssh/**']
+    action: block
+    message: Secret files are off limits.
+    if_unresolved: approve

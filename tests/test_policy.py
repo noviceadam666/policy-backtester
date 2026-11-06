@@ -35,6 +35,10 @@ def test_hash_ignores_comments_and_key_order():
         ({k: v for k, v in GOOD.items() if k != "id"}, "needs a string 'id'"),
         ({**GOOD, "path": []}, "'path' must be"),
         ({**GOOD, "tool": 3}, "'tool' must be"),
+        ({**GOOD, "path": ["**/.env"], "if_unresolved": "ask"}, "'if_unresolved' must be"),
+        ({**GOOD, "if_unresolved": "approve"}, "only means something on a rule with a 'path'"),
+        ({"id": "r", "tool": "terminal", "path": ["**/.env"], "action": "allow", "if_unresolved": "approve"},
+         "'if_unresolved' needs a 'message'"),
     ],
 )
 def test_bad_rules_fail_loudly(rule, complaint):

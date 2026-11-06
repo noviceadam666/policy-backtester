@@ -70,6 +70,12 @@ def render_table(result: BacktestResult, redacted: bool = True, aggregate: bool 
     rows = [["id", "action", "hits", "would-block", "would-escalate", "incidents"]]
     rows += [[r.id, r.action, str(r.hits), str(r.would_block), str(r.would_escalate), str(r.incidents)] for r in result.rules]
     lines += _table(rows)
+    if result.calls_replayed == 0:
+        lines += ["", "No tool calls in this window yet. Hermes records them as your agents work; to see the",
+                  "whole story on a synthetic fleet now, run: hermes backtest demo"]
+    if any(c.after_first_stop for c in result.decisions.values()):
+        lines += ["", "Caught sessions and job runs are exact. Calls marked 'after first stop' are what the agent did",
+                  "with nothing blocked, so the call counts above are upper bounds."]
     lines += ["", f"Caught: {len(result.incidents)} session(s)"]
     if aggregate:
         lines += _aggregate_lines(result.incidents)
@@ -93,7 +99,8 @@ def _incident_lines(incident: Incident, redacted: bool) -> list[str]:
         head += f"  \"{incident.title}\""
     lines = [head]
     for call in incident.calls:
-        lines.append(f"    {call.action:7s} {call.tool}: {describe_call(call, redacted)}  [{_status_note(call)}]")
+        note = _status_note(call) + (" · after first stop" if call.after_first_stop else "")
+        lines.append(f"    {call.action:7s} {call.tool}: {describe_call(call, redacted)}  [{note}]")
     return lines
 
 
@@ -116,6 +123,7 @@ def _hit_json(call: CallHit, redacted: bool) -> dict:
         "status": call.status,
         "action": call.action,
         "rules": list(call.rule_ids),
+        "after_first_stop": call.after_first_stop,
     }
 
 

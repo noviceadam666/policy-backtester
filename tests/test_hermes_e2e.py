@@ -138,6 +138,59 @@ def test_enforce_and_shadow_through_hermess_own_hook_dispatch(plugin_home):
     assert [(d["mode"], d["action"]) for d in logged] == [("enforce", "block"), ("enforce", "block"), ("shadow", "block"), ("shadow", "block")]
 
 
+THROUGH_ONE_PROCESS_PER_PROFILE = """
+import json, sys
+from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+from hermes_cli.plugins import _dispatch_pre_tool_call_hooks, discover_plugins
+out = []
+for home, command in zip(sys.argv[1::2], sys.argv[2::2]):
+    token = set_hermes_home_override(home)
+    try:
+        discover_plugins()
+        block, _ = _dispatch_pre_tool_call_hooks("terminal", {"command": command}, session_id="s", tool_call_id="c")
+    finally:
+        reset_hermes_home_override(token)
+    out.append(block)
+print(json.dumps(out))
+"""
+
+
+@needs_hermes
+def test_profiles_sharing_one_gateway_process_keep_their_own_mode_and_log(tmp_path):
+    """The gateway serves every profile from one process and scopes each turn, cron runs included,
+    with a context-local home override. Each profile's hook must read its own settings and write its
+    own log, and a profile without the plugin must see nothing."""
+    root = tmp_path / "root"
+    refined = REPO / "policies" / "refined.yaml"
+    homes = {name: root / "profiles" / name for name in ("enforcer", "watcher", "bystander")}
+    for name in ("enforcer", "watcher"):
+        shutil.copytree(REPO, homes[name] / "plugins" / "policy-backtester",
+                        ignore=shutil.ignore_patterns(".git", ".venv", "__pycache__", ".pytest_cache"))
+    settings_config(homes["enforcer"], "enforce", refined)
+    settings_config(homes["watcher"], "shadow", refined)
+    homes["bystander"].mkdir(parents=True)
+    (homes["bystander"] / "config.yaml").write_text("plugins:\n  enabled: []\n")
+
+    calls = [("enforcer", UPLOAD), ("watcher", UPLOAD), ("bystander", UPLOAD), ("enforcer", "rm -rf ./cache/*"), ("watcher", "rm -rf /")]
+    env = {**os.environ, "HERMES_HOME": str(root), "PYTHONPATH": str(HERMES_SRC)}
+    argv = [part for name, command in calls for part in (str(homes[name]), command)]
+    done = subprocess.run([hermes_python(), "-c", THROUGH_ONE_PROCESS_PER_PROFILE, *argv],
+                          capture_output=True, text=True, env=env, timeout=120)
+    assert done.returncode == 0, done.stderr
+    results = json.loads(done.stdout.strip().splitlines()[-1])
+    assert results[0].startswith("Secret files are off limits.")
+    assert results[1:] == [None, None, None, None]
+
+    def logged(name):
+        path = homes[name] / "backtest" / "decisions.jsonl"
+        return [(d["mode"], d["action"]) for d in map(json.loads, path.read_text().splitlines())]
+
+    assert logged("enforcer") == [("enforce", "block")]
+    assert logged("watcher") == [("shadow", "block"), ("shadow", "block")]
+    assert not (homes["bystander"] / "backtest").exists()
+    assert not (root / "backtest").exists()
+
+
 @needs_hermes
 def test_shadow_with_a_broken_policy_still_lets_everything_through_hermes(plugin_home):
     settings_config(plugin_home, "shadow", REPO / "policies" / "refined.yaml")

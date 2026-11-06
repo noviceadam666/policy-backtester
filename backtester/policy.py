@@ -18,7 +18,7 @@ from ruamel.yaml.error import YAMLError
 from .matchers import compile_glob
 
 ACTIONS = ("block", "approve", "allow")
-_RULE_FIELDS = frozenset({"id", "tool", "profile", "command", "unless_command", "path", "action", "message"})
+_RULE_FIELDS = frozenset({"id", "tool", "profile", "command", "unless_command", "path", "action", "message", "if_unresolved"})
 
 
 class PolicyError(ValueError):
@@ -35,6 +35,7 @@ class Rule:
     command: re.Pattern[str] | None = None
     unless_command: re.Pattern[str] | None = None
     globs: tuple[re.Pattern[str], ...] = ()
+    if_unresolved: str | None = None
 
     def applies_to(self, tool: str, profile: str | None) -> bool:
         if tool not in self.tools and "*" not in self.tools:
@@ -108,6 +109,14 @@ def _parse_rule(raw: object, source: str) -> Rule:
         raise PolicyError(f"rule {rule_id}: 'action' must be one of {', '.join(ACTIONS)}")
     if action != "allow" and not raw.get("message"):
         raise PolicyError(f"rule {rule_id}: '{action}' needs a 'message' to show the agent")
+    if_unresolved = raw.get("if_unresolved")
+    if if_unresolved is not None:
+        if if_unresolved not in ("block", "approve"):
+            raise PolicyError(f"rule {rule_id}: 'if_unresolved' must be block or approve")
+        if "path" not in raw:
+            raise PolicyError(f"rule {rule_id}: 'if_unresolved' only means something on a rule with a 'path'")
+        if not raw.get("message"):
+            raise PolicyError(f"rule {rule_id}: 'if_unresolved' needs a 'message' to show the agent")
     return Rule(
         id=rule_id,
         tools=frozenset(_string_list(raw["tool"], rule_id, "tool")),
@@ -117,4 +126,5 @@ def _parse_rule(raw: object, source: str) -> Rule:
         command=_regex(raw, rule_id, "command"),
         unless_command=_regex(raw, rule_id, "unless_command"),
         globs=tuple(compile_glob(g) for g in _string_list(raw["path"], rule_id, "path")) if "path" in raw else (),
+        if_unresolved=if_unresolved,
     )

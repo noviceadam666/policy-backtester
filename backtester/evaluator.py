@@ -2,15 +2,20 @@
 
 Every applicable rule is checked. Precedence follows Hermes's hook rules: block beats approve beats
 no directive. ``allow`` means no objection, never approval, so it can't override anything.
+
+A rule with ``if_unresolved`` that doesn't match a command, but can't tell what the command touches
+because the shell would expand part of it, hits with that action instead of passing it.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
-from .matchers import any_glob_matches, normalize_path, segment_candidates, segment_spans, span_at
+from .matchers import any_glob_matches, has_unresolved, normalize_path, segment_candidates, segment_spans, span_at
 from .policy import Policy, Rule
+
+UNRESOLVED_NOTE = "(The command's target couldn't be resolved before it runs.)"
 
 _PATH_ARGS = ("path", "file_path", "filepath", "filename", "paths", "files")
 
@@ -28,12 +33,35 @@ class Verdict:
 
 def evaluate(policy: Policy, tool: str, args: Any, profile: str | None = None) -> Verdict:
     args = args if isinstance(args, dict) else {}
-    hits = tuple(r for r in policy.rules if r.applies_to(tool, profile) and _rule_fires(r, args))
+    hits = tuple(hit for r in policy.rules if r.applies_to(tool, profile) for hit in (_hit(r, args),) if hit)
     for action in ("block", "approve"):
         decisive = next((r for r in hits if r.action == action), None)
         if decisive:
             return Verdict(action, decisive.message, hits)
     return Verdict(None, None, hits)
+
+
+def _hit(rule: Rule, args: dict) -> Rule | None:
+    """The rule as it hits this call: itself, its ``if_unresolved`` stand-in, or None."""
+    if _rule_fires(rule, args):
+        return rule
+    command = args.get("command")
+    if rule.if_unresolved and isinstance(command, str) and _unresolved(rule, command):
+        return replace(rule, action=rule.if_unresolved, message=f"{rule.message} {UNRESOLVED_NOTE}")
+    return None
+
+
+def _unresolved(rule: Rule, command: str) -> bool:
+    """Whether a segment the rule cares about holds an expansion ``unless_command`` doesn't exempt."""
+    spans = [s for s in segment_spans(command) if command[s[0]:s[1]].strip()] or [(0, len(command))]
+    if rule.command is not None:
+        matched = {span_at(spans, m.start()) for m in rule.command.finditer(command)}
+        spans = [s for s in spans if s in matched]
+    for start, end in spans:
+        segment = command[start:end]
+        if has_unresolved(segment) and not (rule.unless_command and rule.unless_command.search(segment)):
+            return True
+    return False
 
 
 def _rule_fires(rule: Rule, args: dict) -> bool:

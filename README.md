@@ -89,6 +89,7 @@ rules:
     path: ['**/.env']           # globs
     action: block               # block, approve or allow
     message: Recursive deletes are blocked.
+    if_unresolved: approve      # optional, path rules only: see below
 ```
 
 All the matchers on a rule have to match. Unknown fields are errors, because an ignored `unless_comand` would
@@ -118,7 +119,16 @@ A terminal call has only a `command`, so a `path` glob matches any path the comm
 
 It over-matches on purpose, because `echo .env >> .gitignore` is a mention too. The backtest is where you find
 that out, and `unless_command` is how you scope it. It can't see through indirection: a shell glob
-(`cat .en*`), a variable (`F=.env; cat $F`) or a parent directory (`tar c config/`).
+(`cat .en*`), a variable set elsewhere (`cat $SECRET_FILE`) or a parent directory (`tar c config/`).
+
+`if_unresolved: approve` (or `block`) on a path rule covers the first two. When the shell would expand part of
+a command (a variable other than `HOME`, a wildcard or a brace list), the rule can't know what the command
+touches, so it asks a human instead of passing it. `unless_command` still exempts segments, and a rule with a
+`command` pattern only looks at the segments that pattern matches. It's noisy by nature: run the backtest to
+see how noisy on your own history before you turn it on. On one seven-profile fleet over 30 days, a path rule
+with `if_unresolved` on every command would have asked 433 times and broken 11 jobs. Scoped to commands that
+read or copy files, as in `policies/strict.yaml` (refined plus one such rule), it asked 12 times and would
+have stopped 2 Kanban tasks. Shadow it before you enforce it.
 
 ## How to read the results
 
@@ -127,12 +137,16 @@ that out, and `unless_command` is how you scope it. It can't see through indirec
 - **Would break** is a blocked call in a cron run or Kanban task that completed, grouped by job. An `approve`
   counts too, because nobody answers a prompt in an unattended run. A subagent counts toward the run that
   spawned it. A hit in a run that failed is an incident instead.
-- Each call is replayed on its own. The replay can't know what the agent would have done after a block, so
-  later counts in the same session are upper bounds.
+- Each call is replayed on its own, so the replay can't know what the agent would have done after a block.
+  Caught sessions and job runs are exact: each one's first stop is a call the agent really made with nothing
+  blocked before it. Calls after it are marked `after first stop` (`after_first_stop` in JSON), and call
+  counts that include them are upper bounds.
 
 ## Limits
 
-- Regex and glob rules see what a command says, not what it does. Treat a clean backtest as evidence, not proof.
+- Regex and glob rules see what a command says, not what it does. `if_unresolved` makes a rule ask when it
+  can't tell, but a parent directory still reads as a different path. Treat a clean backtest as evidence, not
+  proof.
 - Enforcement runs per profile: install and promote in each profile you guard. One ingest still reads them all.
 - Tested on Hermes v0.22.5, v0.22.7 and v0.23.0.
 

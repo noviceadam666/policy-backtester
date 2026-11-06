@@ -134,7 +134,7 @@ that out, and `unless_command` is how you scope it. It can't see through indirec
 
 - Regex and glob rules see what a command says, not what it does. Treat a clean backtest as evidence, not proof.
 - Enforcement runs per profile: install and promote in each profile you guard. One ingest still reads them all.
-- Tested on Hermes v0.22.5 and v0.22.7.
+- Tested on Hermes v0.22.5, v0.22.7 and v0.23.0.
 
 ## Development
 

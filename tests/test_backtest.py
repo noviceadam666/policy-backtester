@@ -114,9 +114,10 @@ def test_allow_rules_count_hits_but_stop_nothing(story):
     assert result.incidents == [] and result.would_break == []
 
 
-def test_a_block_in_a_failed_run_is_an_incident_not_a_break(fleet):
+@pytest.mark.parametrize("status", ["failed", "cancelled"])  # cancelled arrived in Hermes v0.23.0
+def test_a_block_in_a_failed_run_is_an_incident_not_a_break(fleet, status):
     profile = fleet.profile("demo")
-    failed = profile.cron_run("job1", "flaky", ["rm -rf /tmp/x"], status="failed")
+    failed = profile.cron_run("job1", "flaky", ["rm -rf /tmp/x"], status=status)
     profile.write_cron_files()
     ingest(fleet.root, fleet.index)
     index = open_index(fleet.index)

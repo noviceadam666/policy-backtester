@@ -21,6 +21,7 @@ from .policy import PolicyError, load_policy
 from .report import describe_call, diff_to_json, render_diff, render_suggestion, render_table, suggestion_to_json, to_json
 
 _RELATIVE_TIME = re.compile(r"^(\d+)([dh])$")
+BUNDLED = Path(__file__).resolve().parent.parent / "policies"
 # Exit code when --fail-on-break finds a job the policy would break, so a policy change can fail CI.
 BREAKS_EXIT = 3
 
@@ -125,8 +126,26 @@ def _refresh(args: argparse.Namespace, root: Path, index_path: Path, profiles: l
             print(f"backtest: couldn't read {row.profile}: {row.error}", file=sys.stderr)
 
 
+def policy_path(path: Path) -> Path:
+    """The policy file a command names: as given if it exists, else the bundled one of that name.
+
+    After ``hermes plugins install`` the shipped policies live in the plugin's folder, so
+    ``run policies/naive.yaml`` works from anywhere. A file of the same name where you are wins.
+    """
+    path = path.expanduser()
+    if path.exists() or path.is_absolute():
+        return path
+    name = Path(*path.parts[1:]) if path.parts[:1] == ("policies",) and len(path.parts) > 1 else path
+    bundled = BUNDLED / name
+    if bundled.is_file():
+        print(f"backtest: no {path} here, so using the bundled {bundled}", file=sys.stderr)
+        return bundled
+    names = ", ".join(sorted(f.name for f in BUNDLED.glob("*.yaml")))
+    raise PolicyError(f"can't read policy {path}: no such file here, and the bundled policies are {names}")
+
+
 def _cmd_run(args: argparse.Namespace, root: Path, index_path: Path) -> int:
-    policy = load_policy(args.policy)
+    policy = load_policy(policy_path(args.policy))
     _refresh(args, root, index_path)
     index = open_index(index_path)
     try:
@@ -142,7 +161,7 @@ def _cmd_run(args: argparse.Namespace, root: Path, index_path: Path) -> int:
 
 
 def _cmd_diff(args: argparse.Namespace, root: Path, index_path: Path) -> int:
-    before, after = load_policy(args.before), load_policy(args.after)
+    before, after = load_policy(policy_path(args.before)), load_policy(policy_path(args.after))
     _refresh(args, root, index_path)
     since, until = _parse_time(args.since), _parse_time(args.until)
     index = open_index(index_path)
@@ -164,6 +183,7 @@ def _cmd_diff(args: argparse.Namespace, root: Path, index_path: Path) -> int:
 def _cmd_suggest(args: argparse.Namespace, root: Path, index_path: Path) -> int:
     from .suggest import load_proposal, proposed_yaml, suggest
 
+    args.policy = policy_path(args.policy)
     policy = load_policy(args.policy)
     if args.out is not None and args.out.exists():
         raise ValueError(f"{args.out} already exists, and suggest never overwrites a file")
@@ -207,7 +227,7 @@ def _cmd_suggest(args: argparse.Namespace, root: Path, index_path: Path) -> int:
 
 def _cmd_promote(args: argparse.Namespace, root: Path, index_path: Path, live) -> int:
     stage, home, profile = args.backtest_command, Path(live.home()), live.profile()
-    source = args.policy or (Path(live.get("policy", None)) if live.get("policy", None) else None)
+    source = policy_path(args.policy) if args.policy else (Path(live.get("policy", None)) if live.get("policy", None) else None)
     if source is None:
         print("backtest: no policy given, and none is in shadow on this profile", file=sys.stderr)
         return 1

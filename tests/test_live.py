@@ -200,6 +200,12 @@ def test_demo_tells_the_whole_story(capsys, tmp_path):
     out = capsys.readouterr().out
     assert "10 of 10 checks passed" in out
     assert "synthetic" in out.lower()
+    assert f"kept in {tmp_path / 'demo'}" in out
+
+
+def test_demo_says_its_temp_fleet_is_gone(capsys):
+    assert run_demo() == 0
+    assert "deleted; pass --keep DIR" in capsys.readouterr().out
 
 
 def test_enforce_applies_args_rules_to_non_terminal_tools(live):

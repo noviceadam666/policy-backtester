@@ -44,13 +44,13 @@ def _cli(root: Path, live: MemorySettings | None, *argv: str) -> tuple[int, str]
 def run_demo(keep: Path | None = None) -> int:
     root = Path(keep) if keep else Path(tempfile.mkdtemp(prefix="backtest-demo-"))
     try:
-        return _story(root)
+        return _story(root, kept=keep is not None)
     finally:
         if keep is None:
             shutil.rmtree(root, ignore_errors=True)
 
 
-def _story(root: Path) -> int:
+def _story(root: Path, kept: bool) -> int:
     fleet = Fleet(root)
     ops = fleet.profile("demo-ops")
     stage_story(ops)
@@ -111,5 +111,6 @@ def _story(root: Path) -> int:
 
     _step("Checks", "\n".join(f"  {'ok  ' if ok else 'FAIL'}  {name}" for name, ok in checks))
     failed = [name for name, ok in checks if not ok]
-    print(f"\n{len(checks) - len(failed)} of {len(checks)} checks passed. Synthetic fleet: {root}")
+    where = f"Synthetic fleet kept in {root}" if kept else "The synthetic fleet is deleted; pass --keep DIR to look at it"
+    print(f"\n{len(checks) - len(failed)} of {len(checks)} checks passed. {where}.")
     return 1 if failed else 0

@@ -129,3 +129,25 @@ def test_bad_policy_and_bad_time_exit_nonzero(staged, tmp_path, capsys):
 def test_since_all_replays_everything(staged, capsys):
     assert run_cli(staged, "run", str(POLICIES / "naive.yaml"), "--since", "all") == 0
     assert "Replayed 22 calls" in capsys.readouterr().out
+
+
+def test_bundled_policies_work_from_anywhere(staged, tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert run_cli(staged, "run", "policies/naive.yaml") == 0
+    captured = capsys.readouterr()
+    assert "Caught: 3 session(s)" in captured.out
+    assert "using the bundled" in captured.err and str(POLICIES / "naive.yaml") in captured.err
+    assert run_cli(staged, "diff", "naive.yaml", "refined.yaml", "--no-ingest") == 0
+    assert "jobs broken      2       0" in capsys.readouterr().out
+    assert run_cli(staged, "run", "policies/nope.yaml", "--no-ingest") == 1
+    err = capsys.readouterr().err
+    assert "bundled policies are naive.yaml, refined.yaml, strict.yaml, tools.yaml" in err
+
+
+def test_a_local_policy_file_wins_over_a_bundled_one(staged, tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies" / "naive.yaml").write_text("rules: []\n")
+    assert run_cli(staged, "run", "policies/naive.yaml") == 0
+    captured = capsys.readouterr()
+    assert "Caught: 0 session(s)" in captured.out and "bundled" not in captured.err

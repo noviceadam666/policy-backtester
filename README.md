@@ -15,6 +15,10 @@ hermes plugins enable policy-backtester
 hermes backtest demo
 ```
 
+The install scan reports `caution` and asks before installing: the policies, tests and this README quote the
+commands the plugin exists to catch (`rm -rf`, `curl -F`, `.env`), so the scanner flags them. Read the list,
+then answer `y`. To install without a terminal, as in CI, use `hermes plugins install <url> --force --enable`.
+
 `demo` builds a small synthetic Hermes fleet in a temp folder, tells the whole story on it (backtest, suggest
 the fix, shadow, enforce) through the same code the real commands use, and exits non-zero unless all 10 checks
 pass. It doesn't read your history.
@@ -31,7 +35,9 @@ hermes -p ops backtest enforce                                # block or ask, fr
 hermes -p ops backtest off
 ```
 
-`run` and `diff` read every profile and update the index first unless you pass `--no-ingest`. Add `--profile
+The shipped policies (`naive`, `refined`, `strict`, `tools`) work from any folder: when there's no
+`policies/naive.yaml` where you are, the plugin's own copy is used, and it says so. A file of that name where
+you are wins. `run` and `diff` read every profile and update the index first unless you pass `--no-ingest`. Add `--profile
 NAME` to limit a run, `--since 7d` or `--until 2026-11-06` to change the window, `--format json` for a report
 and `--aggregate` for counts only. Output is redacted by default; `--no-redact` shows raw commands and titles.
 
@@ -189,7 +195,7 @@ have stopped 2 Kanban tasks. Shadow it before you enforce it.
   can't tell, but a parent directory still reads as a different path. Treat a clean backtest as evidence, not
   proof.
 - Enforcement runs per profile: install and promote in each profile you guard. One ingest still reads them all.
-- Tested on Hermes v0.22.5, v0.22.7 and v0.23.0.
+- Tested on Hermes v0.22.5, v0.22.7 and v0.23.0, including a fresh v0.23.0 install: `plugins install`, `enable`, `backtest demo`.
 
 ## Development
 

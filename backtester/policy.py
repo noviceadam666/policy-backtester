@@ -18,7 +18,7 @@ from ruamel.yaml.error import YAMLError
 from .matchers import compile_glob
 
 ACTIONS = ("block", "approve", "allow")
-_RULE_FIELDS = frozenset({"id", "tool", "profile", "command", "unless_command", "path", "action", "message", "if_unresolved"})
+_RULE_FIELDS = frozenset({"id", "tool", "profile", "command", "unless_command", "path", "args", "action", "message", "if_unresolved"})
 
 
 class PolicyError(ValueError):
@@ -35,6 +35,7 @@ class Rule:
     command: re.Pattern[str] | None = None
     unless_command: re.Pattern[str] | None = None
     globs: tuple[re.Pattern[str], ...] = ()
+    args: tuple[tuple[str, re.Pattern[str]], ...] = ()
     if_unresolved: str | None = None
 
     def applies_to(self, tool: str, profile: str | None) -> bool:
@@ -87,12 +88,25 @@ def _regex(raw: dict, rule_id: str, field: str) -> re.Pattern[str] | None:
     pattern = raw.get(field)
     if pattern is None:
         return None
+    return _compile(pattern, rule_id, field)
+
+
+def _compile(pattern: object, rule_id: str, field: str) -> re.Pattern[str]:
     if not isinstance(pattern, str):
         raise PolicyError(f"rule {rule_id}: '{field}' must be a regex string")
     try:
         return re.compile(pattern)
     except re.error as exc:
         raise PolicyError(f"rule {rule_id}: bad '{field}' regex: {exc}") from exc
+
+
+def _args(raw: dict, rule_id: str) -> tuple[tuple[str, re.Pattern[str]], ...]:
+    if "args" not in raw:
+        return ()
+    value = raw["args"]
+    if not isinstance(value, dict) or not value or not all(isinstance(k, str) and k for k in value):
+        raise PolicyError(f"rule {rule_id}: 'args' must map argument names to regexes")
+    return tuple((name, _compile(pattern, rule_id, f"args.{name}")) for name, pattern in value.items())
 
 
 def _parse_rule(raw: object, source: str) -> Rule:
@@ -126,5 +140,6 @@ def _parse_rule(raw: object, source: str) -> Rule:
         command=_regex(raw, rule_id, "command"),
         unless_command=_regex(raw, rule_id, "unless_command"),
         globs=tuple(compile_glob(g) for g in _string_list(raw["path"], rule_id, "path")) if "path" in raw else (),
+        args=_args(raw, rule_id),
         if_unresolved=if_unresolved,
     )

@@ -39,6 +39,12 @@ def test_hash_ignores_comments_and_key_order():
         ({**GOOD, "if_unresolved": "approve"}, "only means something on a rule with a 'path'"),
         ({"id": "r", "tool": "terminal", "path": ["**/.env"], "action": "allow", "if_unresolved": "approve"},
          "'if_unresolved' needs a 'message'"),
+        ({**GOOD, "args": ["to"]}, "'args' must map argument names to regexes"),
+        ({**GOOD, "args": {}}, "'args' must map argument names to regexes"),
+        ({**GOOD, "args": {"": "x"}}, "'args' must map argument names to regexes"),
+        ({**GOOD, "args": {"to": "("}}, "bad 'args.to' regex"),
+        ({**GOOD, "args": {"to": 3}}, "'args.to' must be a regex string"),
+        ({**GOOD, "arg": {"to": "x"}}, "unknown field"),
     ],
 )
 def test_bad_rules_fail_loudly(rule, complaint):
@@ -63,3 +69,10 @@ def test_bad_files_fail_loudly(tmp_path):
         parse_policy({"rules": [], "version": 1})
     with pytest.raises(PolicyError, match="duplicate"):
         parse_policy({"rules": [GOOD, GOOD]})
+
+
+def test_args_keep_their_order_and_the_shipped_tools_policy_loads():
+    policy = parse_policy({"rules": [{**GOOD, "args": {"b": "1", "a": "2"}}]})
+    assert [name for name, _ in policy.rules[0].args] == ["b", "a"]
+    tools = load_policy(POLICIES / "tools.yaml")
+    assert all(r.args for r in tools.rules) and all("terminal" not in r.tools for r in tools.rules)

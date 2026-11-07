@@ -212,3 +212,24 @@ def test_an_empty_window_points_at_the_demo(story):
     result = run_backtest(index, NAIVE, since=T0 + 10**9)
     assert result.calls_replayed == 0
     assert "hermes backtest demo" in render_table(result)
+
+
+def test_notes_name_rules_the_window_cant_test(story):
+    from backtester.report import render_table, to_json
+
+    index, *_ = story
+    policy = parse_policy({"rules": [
+        {"id": "typo", "tool": "read_file", "args": {"paht": "x"}, "action": "block", "message": "m"},
+        {"id": "fine", "tool": "read_file", "args": {"path": "README"}, "action": "block", "message": "m"},
+        {"id": "unused", "tool": "send_message", "args": {"target": "x"}, "action": "block", "message": "m"},
+    ]})
+    result = run_backtest(index, policy)
+    assert by_rule(result)["typo"].unseen_args == ["paht"]
+    assert by_rule(result)["fine"].unseen_args == [] and by_rule(result)["fine"].hits == 1
+    assert by_rule(result)["unused"].checked == 0
+    text = render_table(result)
+    assert "typo: no read_file call here has an argument named 'paht'" in text
+    assert "unused: no send_message call in this window" in text
+    assert "fine:" not in text
+    assert to_json(result)["rules"][0]["unseen_args"] == ["paht"]
+    assert "Notes" not in render_table(run_backtest(index, NAIVE))

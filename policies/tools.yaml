@@ -1,0 +1,29 @@
+# Starter rules for tools other than the terminal, on the argument names Hermes records for them.
+# Each one stops a secret leaving through a tool that sends text somewhere: a search provider, a
+# Kanban board, another agent. The secret shapes are written once and reused (&secret, *secret).
+# Backtest it on your own history before you shadow it.
+rules:
+  - id: no-secrets-in-search
+    tool: web_search
+    args:
+      query: &secret '-----BEGIN [A-Z ]*PRIVATE KEY|\b(?:sk|rk)[-_][A-Za-z0-9_-]{20,}|\bAKIA[0-9A-Z]{16}\b|\b(?:ghp|gho|ghs|github_pat)_[A-Za-z0-9_]{16,}|\bxox[abprs]-[A-Za-z0-9-]{10,}'
+    action: block
+    message: A search query can't carry a secret.
+  - id: no-secrets-on-cards
+    tool: [kanban_create, kanban_comment]
+    args:
+      body: *secret
+    action: block
+    message: Kanban cards and comments can't carry a secret.
+  - id: no-secrets-to-agents
+    tool: message_agent
+    args:
+      message: *secret
+    action: block
+    message: Messages to other agents can't carry a secret.
+  - id: no-secret-attachments
+    tool: kanban_attach
+    args:
+      filename: '(^|/)(\.env(\.[\w.-]+)?|[^/]*\.pem|id_(rsa|ed25519|ecdsa)|vendor-api\.yaml)$'
+    action: block
+    message: Secret files can't be attached to a card.

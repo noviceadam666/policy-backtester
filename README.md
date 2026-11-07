@@ -15,14 +15,15 @@ hermes plugins enable policy-backtester
 hermes backtest demo
 ```
 
-`demo` builds a small synthetic Hermes fleet in a temp folder, tells the whole story on it (backtest, fix,
-shadow, enforce) through the same code the real commands use, and exits non-zero unless all 9 checks pass. It
-doesn't read your history.
+`demo` builds a small synthetic Hermes fleet in a temp folder, tells the whole story on it (backtest, suggest
+the fix, shadow, enforce) through the same code the real commands use, and exits non-zero unless all 10 checks
+pass. It doesn't read your history.
 
 ## On your own history
 
 ```bash
 hermes backtest run policies/naive.yaml                       # what it would catch and break, last 30 days
+hermes backtest suggest policies/naive.yaml --out mine.yaml   # propose exact exemptions for the jobs it breaks
 hermes backtest diff policies/naive.yaml policies/refined.yaml
 hermes -p ops backtest shadow policies/refined.yaml           # log decisions on live calls, change nothing
 hermes -p ops backtest log                                    # what shadow would have stopped, jobs untouched
@@ -34,10 +35,25 @@ hermes -p ops backtest off
 NAME` to limit a run, `--since 7d` or `--until 2026-11-06` to change the window, `--format json` for a report
 and `--aggregate` for counts only. Output is redacted by default; `--no-redact` shows raw commands and titles.
 
+### Let it propose the fix: `suggest`
+
+`suggest` backtests a policy and, for each job it would break, proposes an `unless_command` pinned to the exact
+command that job ran: the command's words escaped, any whitespace between them, anchored to the whole segment,
+the way `policies/refined.yaml` is scoped. It prints what it proposes, the backtest before and after (as `diff`
+does) and the proposed policy, or writes the policy to `--out FILE`, a new file. It never applies it.
+
+It only pins a command that's the same in every run that hit the rule. A command that changes between runs, or
+a job stopped by a call that isn't a terminal command, is listed under "Left for a human" rather than met with
+a wider regex. If an exemption would also let through a call in an interactive session the policy used to
+catch, it says so. On the demo fleet, `suggest naive.yaml` lands on `refined.yaml`'s cache exemption exactly, and
+on a tighter release-job one (`--force` to `scratch/release` only), with the same catches and no jobs broken.
+The proposed policy holds the commands it exempts unredacted, since that's what it matches on.
+
 ### In CI
 
-`--fail-on-break` makes `run` exit 3 when the policy would break a job, and `diff` exit 3 when the new version
-breaks one the old didn't, so a policy change can fail review before it reaches an agent.
+`--fail-on-break` makes `run` exit 3 when the policy would break a job, `diff` exit 3 when the new version
+breaks one the old didn't, and `suggest` exit 3 when its proposal still breaks one, so a policy change can fail
+review before it reaches an agent.
 
 ## Promotion: backtest, shadow, enforce
 
@@ -87,6 +103,7 @@ rules:
     command: 'rm\s+-rf'         # regex, searched in the whole command
     unless_command: '^\s*rm\s+-rf\s+\./cache/\*\s*$'
     path: ['**/.env']           # globs
+    args: {workdir: '^/srv/'}   # optional: argument name to regex, any tool
     action: block               # block, approve or allow
     message: Recursive deletes are blocked.
     if_unresolved: approve      # optional, path rules only: see below
@@ -95,6 +112,28 @@ rules:
 All the matchers on a rule have to match. Unknown fields are errors, because an ignored `unless_comand` would
 silently change what a rule does. Block beats approve beats no directive. `allow` means no objection, never
 approval.
+
+### `args` for tools other than the terminal
+
+`args` maps argument names to regexes, and every one has to match: the argument must be present, and its value
+is searched as a string, or as JSON when it isn't one (a list, a mapping, a number, `true`). It works on any tool,
+including MCP tools, in the backtest and in the live hook alike:
+
+```yaml
+  - id: no-secrets-on-cards
+    tool: [kanban_create, kanban_comment]
+    args:
+      body: '\bAKIA[0-9A-Z]{16}\b|-----BEGIN [A-Z ]*PRIVATE KEY'
+    action: block
+    message: Kanban cards and comments can't carry a secret.
+```
+
+Use the names Hermes records for the tool, such as `query` on `web_search`, `body` on `kanban_comment`, `message`
+on `message_agent`, `filename` on `kanban_attach`. A misspelled name never matches, so the backtest notes any
+`args` name that no call of the rule's tools carried. `content`, `old_string`, `new_string` and `patch` are
+stored as a length in the index, so the backtest can't test a rule on them, though the live hook sees them.
+`policies/tools.yaml` has four starter rules that keep secrets out of searches, cards, messages to other agents
+and card attachments. On one seven-profile fleet over 30 days they hit nothing and broke no jobs.
 
 ### `unless_command` works per segment, so anchor it
 
@@ -137,6 +176,8 @@ have stopped 2 Kanban tasks. Shadow it before you enforce it.
 - **Would break** is a blocked call in a cron run or Kanban task that completed, grouped by job. An `approve`
   counts too, because nobody answers a prompt in an unattended run. A subagent counts toward the run that
   spawned it. A hit in a run that failed is an incident instead.
+- **Notes** list rules the window can't test: no call of their tools in it, or an `args` name none of those
+  calls carried.
 - Each call is replayed on its own, so the replay can't know what the agent would have done after a block.
   Caught sessions and job runs are exact: each one's first stop is a call the agent really made with nothing
   blocked before it. Calls after it are marked `after first stop` (`after_first_stop` in JSON), and call

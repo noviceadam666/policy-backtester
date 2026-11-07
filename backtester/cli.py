@@ -1,4 +1,4 @@
-"""``hermes backtest ingest | run | diff | shadow | enforce | off | log | status | demo``."""
+"""``hermes backtest ingest | run | diff | suggest | shadow | enforce | off | log | status | demo``."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from .ingest import IngestSummary, ingest
 from .live import MODES, decisions, install_policy, promotions, record_promotion
 from .paths import default_index, default_root
 from .policy import PolicyError, load_policy
-from .report import describe_call, diff_to_json, render_diff, render_table, to_json
+from .report import describe_call, diff_to_json, render_diff, render_suggestion, render_table, suggestion_to_json, to_json
 
 _RELATIVE_TIME = re.compile(r"^(\d+)([dh])$")
 # Exit code when --fail-on-break finds a job the policy would break, so a policy change can fail CI.
@@ -42,6 +42,11 @@ def setup_parser(parser: argparse.ArgumentParser) -> None:
     diff.add_argument("before", type=Path)
     diff.add_argument("after", type=Path)
     _add_replay_options(diff)
+
+    suggest = sub.add_parser("suggest", help="Propose exemptions for the jobs a policy would break, and backtest them; applies nothing")
+    suggest.add_argument("policy", type=Path)
+    _add_replay_options(suggest)
+    suggest.add_argument("--out", type=Path, help="write the proposed policy to this new file instead of printing it")
 
     for stage, text in (("shadow", "Log what a policy would do on this profile's live calls, changing nothing"),
                         ("enforce", "Enforce a policy on this profile: it must have run in shadow and break no jobs")):
@@ -154,6 +159,50 @@ def _cmd_diff(args: argparse.Namespace, root: Path, index_path: Path) -> int:
     else:
         print(render_diff(diff, redacted))
     return BREAKS_EXIT if args.fail_on_break and diff.newly_broken else 0
+
+
+def _cmd_suggest(args: argparse.Namespace, root: Path, index_path: Path) -> int:
+    from .suggest import load_proposal, proposed_yaml, suggest
+
+    policy = load_policy(args.policy)
+    if args.out is not None and args.out.exists():
+        raise ValueError(f"{args.out} already exists, and suggest never overwrites a file")
+    _refresh(args, root, index_path)
+    since, until = _parse_time(args.since), _parse_time(args.until)
+    index = open_index(index_path)
+    try:
+        before = run_backtest(index, policy, since, until, args.profile)
+        suggestion = suggest(before)
+        text = None
+        after = before
+        if suggestion.patterns:
+            text = proposed_yaml(args.policy.read_text(), suggestion, [
+                f"Proposed by hermes backtest suggest from {args.policy.name} (sha256 {policy.hash[:12]}) on {datetime.now():%Y-%m-%d}.",
+                "Each unless_command added exempts only the exact command a job ran. Review it, then shadow it.",
+            ])
+            after = run_backtest(index, load_proposal(text, str(args.out or "proposed")), since, until, args.profile)
+    finally:
+        index.close()
+    redacted = not args.no_redact
+    if not before.would_break:
+        print(f"Nothing to suggest: {args.policy.name} breaks no jobs in this window.")
+        return 0
+    diff = diff_results(before, after)
+    if args.out is not None and text is not None:
+        with open(args.out, "x") as f:
+            f.write(text)
+    if args.format == "json":
+        print(json.dumps(suggestion_to_json(suggestion, diff, None if args.out else text, redacted), indent=2))
+    else:
+        print(render_suggestion(suggestion, diff, redacted))
+        if text is None:
+            print("\nNo policy proposed: every break needs a human.")
+        elif args.out is not None:
+            print(f"\nWrote the proposed policy to {args.out}. Nothing was applied.")
+        else:
+            print("\nProposed policy, not applied (it holds the exact commands, unredacted)\n")
+            print(text.rstrip())
+    return BREAKS_EXIT if args.fail_on_break and after.would_break else 0
 
 
 def _cmd_promote(args: argparse.Namespace, root: Path, index_path: Path, live) -> int:
@@ -322,5 +371,5 @@ def _parse_time(value: str | None) -> float | None:
         raise ValueError(f"can't read time {value!r}: use 30d, 12h or YYYY-MM-DD") from None
 
 
-_COMMANDS = {"ingest": _cmd_ingest, "run": _cmd_run, "diff": _cmd_diff, "status": _cmd_status, "demo": _cmd_demo}
+_COMMANDS = {"ingest": _cmd_ingest, "run": _cmd_run, "diff": _cmd_diff, "suggest": _cmd_suggest, "status": _cmd_status, "demo": _cmd_demo}
 _LIVE_COMMANDS = {"shadow": _cmd_promote, "enforce": _cmd_promote, "off": _cmd_off, "log": _cmd_log}

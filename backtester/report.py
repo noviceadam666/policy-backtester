@@ -12,7 +12,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from .engine import BacktestResult, CallHit, Incident, JobBreak, PolicyDiff
+from .engine import CAUGHT, BacktestResult, CallHit, Incident, JobBreak, PolicyDiff
 from .redact import redact
 
 _SNIPPET = 110
@@ -70,6 +70,7 @@ def render_table(result: BacktestResult, redacted: bool = True, aggregate: bool 
     rows = [["id", "action", "hits", "would-block", "would-escalate", "incidents"]]
     rows += [[r.id, r.action, str(r.hits), str(r.would_block), str(r.would_escalate), str(r.incidents)] for r in result.rules]
     lines += _table(rows)
+    lines += _rule_notes(result)
     if result.calls_replayed == 0:
         lines += ["", "No tool calls in this window yet. Hermes records them as your agents work; to see the",
                   "whole story on a synthetic fleet now, run: hermes backtest demo"]
@@ -86,6 +87,19 @@ def render_table(result: BacktestResult, redacted: bool = True, aggregate: bool 
     for job in result.would_break:
         lines += _job_lines(job, redacted, aggregate)
     return "\n".join(lines)
+
+
+def _rule_notes(result: BacktestResult) -> list[str]:
+    """Rules the window can't test: no call their tool and profile cover, or an argument name never sent."""
+    tools = {r.id: ", ".join(sorted(r.tools)) + (f" on {', '.join(sorted(r.profiles))}" if r.profiles else "")
+             for r in result.policy.rules}
+    notes = []
+    for stat in result.rules:
+        if result.calls_replayed and not stat.checked:
+            notes.append(f"  {stat.id}: no {tools[stat.id]} call in this window, so this backtest can't test it.")
+        for name in stat.unseen_args:
+            notes.append(f"  {stat.id}: no {tools[stat.id]} call here has an argument named '{name}', so it can't match. Check the spelling.")
+    return ["", "Notes", *notes] if notes else []
 
 
 def _aggregate_lines(incidents: list[Incident]) -> list[str]:
@@ -135,7 +149,8 @@ def to_json(result: BacktestResult, redacted: bool = True, aggregate: bool = Fal
         "window": {"since": result.since, "until": result.until, "oldest_call": result.oldest_call, "newest_call": result.newest_call},
         "totals": {"calls": result.calls_replayed, "sessions": result.sessions_replayed, "profiles": len(result.profiles)},
         "rules": [
-            {"id": r.id, "action": r.action, "hits": r.hits, "would_block": r.would_block, "would_escalate": r.would_escalate, "incidents": r.incidents}
+            {"id": r.id, "action": r.action, "hits": r.hits, "would_block": r.would_block, "would_escalate": r.would_escalate,
+             "incidents": r.incidents, "checked": r.checked, "unseen_args": r.unseen_args}
             for r in result.rules
         ],
         "caught": len(result.incidents),
@@ -211,4 +226,51 @@ def diff_to_json(diff: PolicyDiff, redacted: bool = True) -> dict:
         "before": {"source": _policy_label(diff.old, redacted), "sha256": diff.old.policy.hash, "caught": len(diff.old.incidents), "would_break": len(diff.old.would_break)},
         "after": {"source": _policy_label(diff.new, redacted), "sha256": diff.new.policy.hash, "caught": len(diff.new.incidents), "would_break": len(diff.new.would_break)},
         **{name: [_hit_json(c, redacted) for c in hits] for name, hits in groups.items()},
+    }
+
+
+def _segment(text: str, redacted: bool) -> str:
+    return redact(text) if redacted else text
+
+
+def render_suggestion(suggestion, diff: PolicyDiff, redacted: bool = True) -> str:
+    """What ``suggest`` proposes, the backtest before and after, and anything it left for a human."""
+    lines = [
+        f"Suggest  {_policy_label(diff.old, redacted)}  (sha256 {diff.old.policy.hash[:12]})",
+        f"History  {_coverage(diff.old)}",
+        "",
+        "Exemptions, each pinned to the exact command its job ran",
+    ]
+    width = max((len(x.rule_id) for x in [*suggestion.exemptions, *suggestion.for_review]), default=0)
+    if not suggestion.exemptions:
+        lines.append("  none")
+    for e in suggestion.exemptions:
+        lines.append(f"  {e.rule_id:{width}s}  {job_label(e.job, redacted)} ({e.job.kind}, {e.job.profile}),"
+                     f" {e.runs_hit} of {e.job.completed_runs} completed runs")
+        lines += [f"  {'':{width}s}    {_segment(segment, redacted)}" for segment in e.segments]
+    lines.append("Left for a human" + ("" if suggestion.for_review else ": none"))
+    for r in suggestion.for_review:
+        lines.append(f"  {r.rule_id:{width}s}  {job_label(r.job, redacted)} ({r.job.kind}, {r.job.profile}): {r.reason}")
+    lines += ["", render_diff(diff, redacted)]
+    lost = [h for h in diff.no_longer_matched if h.outcome == CAUGHT]
+    if lost:
+        lines += ["", f"Careful: the exemptions also stop catching {len(lost)} call(s) outside these jobs, listed under",
+                  "'No longer matched'. Review them before you use this policy."]
+    return "\n".join(lines)
+
+
+def suggestion_to_json(suggestion, diff: PolicyDiff, policy_yaml: str | None, redacted: bool = True) -> dict:
+    return {
+        "exemptions": [
+            {"rule": e.rule_id, "job": job_label(e.job, redacted), "kind": e.job.kind, "profile": e.job.profile,
+             "runs_hit": e.runs_hit, "completed_runs": e.job.completed_runs,
+             "commands": [_segment(segment, redacted) for segment in e.segments]}
+            for e in suggestion.exemptions
+        ],
+        "for_review": [
+            {"rule": r.rule_id, "job": job_label(r.job, redacted), "kind": r.job.kind, "profile": r.job.profile, "reason": r.reason}
+            for r in suggestion.for_review
+        ],
+        "diff": diff_to_json(diff, redacted),
+        "policy_yaml": policy_yaml,
     }

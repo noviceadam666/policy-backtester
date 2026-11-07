@@ -85,6 +85,14 @@ def test_the_story_through_the_real_plugin_manager(plugin_home, fleet):
     assert report["newly_broken"] == [] and report["newly_caught"] == []
     assert len(report["no_longer_matched"]) == 4
 
+    proposed = fleet.root / "proposed.yaml"
+    suggest = backtest(plugin_home, "--hermes-root", str(fleet.root), "suggest", str(naive), "--out", str(proposed))
+    assert suggest.returncode == 0, suggest.stderr
+    assert "Left for a human: none" in suggest.stdout
+    rerun = backtest(plugin_home, "--hermes-root", str(fleet.root), "run", str(proposed), "--fail-on-break")
+    assert rerun.returncode == 0, rerun.stderr
+    assert "Caught: 3 session(s)" in rerun.stdout and "Would break: 0 job(s)" in rerun.stdout
+
     assert hashlib.sha256(profile.db_path.read_bytes()).hexdigest() == state
 
 

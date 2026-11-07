@@ -198,5 +198,14 @@ def test_fail_on_break_exit_codes(fleet, ops, live):
 def test_demo_tells_the_whole_story(capsys, tmp_path):
     assert run_demo(tmp_path / "demo") == 0
     out = capsys.readouterr().out
-    assert "9 of 9 checks passed" in out
+    assert "10 of 10 checks passed" in out
     assert "synthetic" in out.lower()
+
+
+def test_enforce_applies_args_rules_to_non_terminal_tools(live):
+    guard = promote(live, POLICIES / "tools.yaml", "enforce")
+    leak = guard(tool_name="kanban_comment", args={"task_id": "t_1", "body": "key AKIA" + "Q" * 16}, session_id="s1")
+    assert leak["action"] == "block" and "no-secrets-on-cards" in leak["message"]
+    assert guard(tool_name="kanban_comment", args={"task_id": "t_1", "body": "done"}) is None
+    [row] = decisions(live.home())
+    assert row["tool"] == "kanban_comment" and row["rules"] == ["no-secrets-on-cards"]

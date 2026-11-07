@@ -231,3 +231,66 @@ def test_strict_is_refined_plus_one_rule():
 @pytest.mark.parametrize("args", [None, "rm -rf", [], 3, {"command": 7}, {"path": None}])
 def test_odd_arguments_never_raise(args):
     assert evaluate(NAIVE, "terminal", args).action is None
+
+
+# ``args``: a precondition on any tool, every named argument present and matching.
+SECRET_KEY = "AKIA" + "Q" * 16
+TOOLS = load_policy(POLICIES / "tools.yaml")
+
+
+def args_rule(args, **extra):
+    return parse_policy({"rules": [{"id": "a", "tool": extra.pop("tool", "*"), "args": args, "action": "block", "message": "m", **extra}]})
+
+
+@pytest.mark.parametrize(
+    "args,call,fires",
+    [
+        ({"to": r"@(?!example\.org$)"}, {"to": "ops@vendor.example"}, True),
+        ({"to": r"@(?!example\.org$)"}, {"to": "me@example.org"}, False),
+        ({"to": "x"}, {}, False),
+        ({"to": "x", "subject": "y"}, {"to": "x"}, False),
+        ({"to": "x", "subject": "y"}, {"to": "x", "subject": "y"}, True),
+        ({"tasks": r'"toolsets": \[[^]]*"terminal"'}, {"tasks": [{"goal": "g", "toolsets": ["terminal"]}]}, True),
+        ({"metadata": r'"token": "'}, {"metadata": {"token": "t", "a": 1}}, True),
+        ({"limit": r"^[5-9]\d$"}, {"limit": 50}, True),
+        ({"replace_all": "^true$"}, {"replace_all": True}, True),
+        ({"query": "café"}, {"query": "le café"}, True),
+    ],
+)
+def test_args_match_named_arguments_and_json_for_the_rest(args, call, fires):
+    assert (evaluate(args_rule(args), "any_tool", call).action == "block") is fires
+
+
+def test_args_combine_with_the_other_matchers():
+    on_command = args_rule({"workdir": "^/srv/"}, tool="terminal", command=r"rm\s+-rf")
+    assert evaluate(on_command, *terminal("rm -rf x", workdir="/srv/app")).action == "block"
+    assert evaluate(on_command, *terminal("rm -rf x", workdir="/tmp")).action is None
+    assert evaluate(on_command, *terminal("ls", workdir="/srv/app")).action is None
+    on_path = args_rule({"limit": "^[0-9]{4,}$"}, tool="read_file", path=["**/*.log"])
+    assert evaluate(on_path, "read_file", {"path": "a/big.log", "limit": 5000}).action == "block"
+    assert evaluate(on_path, "read_file", {"path": "a/big.log", "limit": 50}).action is None
+    assert evaluate(on_path, "read_file", {"path": "a/notes.md", "limit": 5000}).action is None
+    unresolved = args_rule({"workdir": "^/srv/"}, tool="terminal", path=["**/.env"], if_unresolved="approve")
+    assert evaluate(unresolved, *terminal("cat $F", workdir="/tmp")).action is None
+    assert evaluate(unresolved, *terminal("cat $F", workdir="/srv/app")).action == "approve"
+
+
+@pytest.mark.parametrize(
+    "tool,args,rule_ids",
+    [
+        ("web_search", {"query": f"why is {SECRET_KEY} rejected"}, ["no-secrets-in-search"]),
+        ("web_search", {"query": "AWS access key format"}, []),
+        ("kanban_comment", {"task_id": "t_1", "body": f"use key {SECRET_KEY}"}, ["no-secrets-on-cards"]),
+        ("kanban_create", {"title": "t", "body": "-----BEGIN OPENSSH PRIVATE KEY-----"}, ["no-secrets-on-cards"]),
+        ("kanban_comment", {"task_id": "t_1", "body": "done, see the PR"}, []),
+        ("message_agent", {"target": "researcher", "message": "token: xoxb-" + "1" * 12}, ["no-secrets-to-agents"]),
+        ("message_agent", {"target": "researcher", "message": "summary attached"}, []),
+        ("kanban_attach", {"task_id": "t_1", "filename": ".env", "content_base64": "<omitted>"}, ["no-secret-attachments"]),
+        ("kanban_attach", {"task_id": "t_1", "filename": "config/vendor-api.yaml"}, ["no-secret-attachments"]),
+        ("kanban_attach", {"task_id": "t_1", "filename": "report.env.md"}, []),
+        ("kanban_attach", {"task_id": "t_1", "filename": "report.pdf"}, []),
+        ("terminal", {"command": f"echo {SECRET_KEY}"}, []),
+    ],
+)
+def test_tools_policy(tool, args, rule_ids):
+    assert list(evaluate(TOOLS, tool, args).rule_ids) == rule_ids

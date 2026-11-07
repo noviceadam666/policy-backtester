@@ -43,6 +43,10 @@ class RuleStats:
     would_block: int = 0
     would_escalate: int = 0
     incident_sessions: set = field(default_factory=set)
+    # Calls the rule's tool and profile scope cover, and ``args`` names none of them carried: a
+    # misspelled name never matches, and nothing else would say so.
+    checked: int = 0
+    unseen_args: list = field(default_factory=list)
 
     @property
     def incidents(self) -> int:
@@ -133,6 +137,7 @@ def run_backtest(
         """,
         params,
     )
+    seen_args: dict[str, set[str]] = {r.id: set() for r in policy.rules if r.args}
     incidents: dict[tuple[str, str], Incident] = {}
     breaks: dict[tuple[str, str], JobBreak] = {}
     sessions: set[tuple[str, str]] = set()
@@ -144,6 +149,11 @@ def run_backtest(
         result.oldest_call = row["ts"] if result.oldest_call is None else result.oldest_call
         result.newest_call = row["ts"]
         args = json.loads(row["args"])
+        for rule in policy.rules:
+            if rule.applies_to(row["tool"], row["profile"]):
+                stats[rule.id].checked += 1
+                if rule.args and isinstance(args, dict):
+                    seen_args[rule.id].update(name for name, _ in rule.args if name in args)
         verdict = evaluate(policy, row["tool"], args, row["profile"])
         if not verdict.hits:
             continue
@@ -184,6 +194,9 @@ def run_backtest(
             incidents[key].calls.append(hit)
             for rule_id in verdict.rule_ids:
                 stats[rule_id].incident_sessions.add(key)
+    for rule in policy.rules:
+        if rule.args and stats[rule.id].checked:
+            stats[rule.id].unseen_args = [name for name, _ in rule.args if name not in seen_args[rule.id]]
     result.incidents = sorted(incidents.values(), key=lambda i: i.calls[0].ts)
     result.would_break = sorted(breaks.values(), key=lambda b: b.calls[0].ts)
     result.sessions_replayed = len(sessions)

@@ -1,5 +1,5 @@
 name: policy-backtester
-version: 0.2.0
+version: 0.3.0
 description: "Backtest guardrail policies against your agents' real tool-call history, then shadow and enforce them."
 author: Novice Adam
 requires_hermes: ">=0.22.5"

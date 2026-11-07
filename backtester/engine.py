@@ -4,6 +4,10 @@ Each call is replayed on its own. The replay can say a call would have been stop
 agent would have done next. A session's or run's first stop is exact, since nothing before it was
 stopped, so caught sessions and runs hit are exact. Calls after it are marked ``after_first_stop``, and
 call counts that include them are upper bounds.
+
+A scheduled job with no completed run in the window can't break in the replay, because there's nothing
+of it to replay. Given the jobs each profile has scheduled, the result names those as ``cant_vouch``, so
+"breaks no jobs" is never said about a job the backtest didn't see.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ import sqlite3
 from dataclasses import dataclass, field
 
 from .evaluator import evaluate
+from .ingest import ScheduledJob
 from .policy import Policy
 
 CAUGHT = "caught"
@@ -101,6 +106,9 @@ class BacktestResult:
     incidents: list[Incident] = field(default_factory=list)
     would_break: list[JobBreak] = field(default_factory=list)
     decisions: dict = field(default_factory=dict)
+    # None when the caller didn't say which jobs are scheduled, so coverage wasn't checked.
+    scheduled: list[ScheduledJob] | None = None
+    cant_vouch: list[ScheduledJob] = field(default_factory=list)
 
 
 def _window_clause(since: float | None, until: float | None, profiles: list[str] | None) -> tuple[str, list]:
@@ -123,6 +131,7 @@ def run_backtest(
     since: float | None = None,
     until: float | None = None,
     profiles: list[str] | None = None,
+    scheduled: list[ScheduledJob] | None = None,
 ) -> BacktestResult:
     result = BacktestResult(policy, since, until)
     stats = {r.id: RuleStats(r.id, r.action) for r in policy.rules}
@@ -201,6 +210,9 @@ def run_backtest(
     result.would_break = sorted(breaks.values(), key=lambda b: b.calls[0].ts)
     result.sessions_replayed = len(sessions)
     result.profiles = tuple(sorted(seen_profiles))
+    if scheduled is not None:
+        result.scheduled = [j for j in scheduled if not profiles or j.profile in profiles]
+        result.cant_vouch = [j for j in result.scheduled if not _completed_runs(index, j.profile, j.job_id, since, until)]
     return result
 
 

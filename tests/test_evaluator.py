@@ -190,7 +190,7 @@ def test_if_unresolved_is_opt_in_and_keeps_the_rule_id():
     assert evaluate(plain, *terminal("cat $SECRET_FILE")).action is None
     verdict = evaluate(UNRESOLVED, *terminal("cat $SECRET_FILE"))
     assert verdict.rule_ids == ("secrets",)
-    assert verdict.message.startswith("No secrets.") and "couldn't be resolved" in verdict.message
+    assert verdict.message == "No secrets. (It can't tell what $SECRET_FILE names until the shell expands it.)"
 
 
 def test_if_unresolved_respects_command_and_unless_command():
@@ -294,3 +294,61 @@ def test_args_combine_with_the_other_matchers():
 )
 def test_tools_policy(tool, args, rule_ids):
     assert list(evaluate(TOOLS, tool, args).rule_ids) == rule_ids
+
+
+VENDOR = parse_policy({"rules": [{**SECRETS, "tool": "terminal", "path": ["**/config/vendor-api.yaml", "~/.ssh/**"],
+                                  "if_unresolved": "approve"}]})
+
+
+@pytest.mark.parametrize(
+    "command,action",
+    [
+        ("rm -rf ./cache/*", None),            # a wildcard in cache/ can't name config/vendor-api.yaml
+        ("cat ./cache/*.log /tmp/*.txt", None),
+        ("cat config/vendor*", "approve"),
+        ("cat */vendor-api.yaml", "approve"),
+        ("cd config && cat vendor*", "approve"),
+        ("cat ../*", "approve"),               # a parent hop could be anywhere
+        ('cat "$X"', "approve"),               # so could a variable
+        ("cat {a,config}/vendor-api.yaml", "approve"),
+        ("cat ~/.ss*/id_rsa", "approve"),
+    ],
+)
+def test_if_unresolved_skips_wildcards_that_cant_reach_the_rules_paths(command, action):
+    assert evaluate(VENDOR, *terminal(command)).action == action
+
+
+def test_the_message_names_the_word_it_couldnt_resolve():
+    assert evaluate(VENDOR, *terminal("ls; cat config/vendor*")).message == (
+        "No secrets. (It can't tell what config/vendor* names until the shell expands it.)")
+
+
+PINNED = parse_policy({"rules": [{
+    "id": "rm", "tool": "terminal", "command": r"rm\s+-rf", "action": "block", "message": "m",
+    "unless": [{"command": r"^\s*rm\s+-rf\s+\./cache/\*\s*$", "workdir": "/srv/app/"},
+               {"command": r"^\s*rm\s+-rf\s+\./tmp\s*$"}],
+}]})
+
+
+@pytest.mark.parametrize(
+    "args,action",
+    [
+        ({"command": "rm -rf ./cache/*", "workdir": "/srv/app"}, None),
+        ({"command": "cd /srv/app && rm -rf ./cache/*"}, None),
+        ({"command": "cd /srv && cd app && rm -rf ./cache/*"}, None),
+        ({"command": "cd app && rm -rf ./cache/*", "workdir": "/srv"}, None),
+        ({"command": "rm -rf ./tmp", "workdir": "/"}, None),             # an entry without workdir works anywhere
+        ({"command": "rm -rf ./cache/*"}, "block"),                      # no folder shown
+        ({"command": "rm -rf ./cache/*", "workdir": "/"}, "block"),
+        ({"command": "cd / && rm -rf ./cache/*", "workdir": "/srv/app"}, "block"),
+        ({"command": "cd /srv/app; rm -rf ./cache/*"}, "block"),          # the cd may have failed
+        ({"command": "cd /srv/app || rm -rf ./cache/*"}, "block"),
+        ({"command": "(cd /srv/app) && rm -rf ./cache/*"}, "block"),     # a subshell's cd doesn't last
+        ({"command": "true | cd /srv/app && rm -rf ./cache/*"}, "block"),
+        ({"command": "cd $DIR && rm -rf ./cache/*"}, "block"),
+        ({"command": "eval cd / && rm -rf ./cache/*", "workdir": "/srv/app"}, "block"),
+        ({"command": 'bash -c "cd / && rm -rf ./cache/*"', "workdir": "/srv/app"}, "block"),
+    ],
+)
+def test_a_pinned_exemption_holds_only_where_the_call_shows_it_runs(args, action):
+    assert evaluate(PINNED, "terminal", args).action == action

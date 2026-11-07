@@ -1,0 +1,45 @@
+# Hardened: a proposal, not a default. refined.yaml plus fixes for the bypasses that cases/refined.yaml
+# marks as refined's known misses. Check it (hermes backtest check hardened.yaml --cases cases/refined.yaml),
+# backtest it and shadow it before you enforce it: its patterns are wider, so they can catch working jobs.
+rules:
+  - id: no-recursive-delete
+    tool: terminal
+    command: '(^|[\s;&|(`])(rm\s(?:[^;&|\n]*\s)?(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(\s|$)|find\s[^;&|\n]*\s-(delete|exec\s+rm)(\s|$))'
+    unless:
+      - command: '^\s*rm\s+-rf\s+\./cache/\*\s*$'
+        workdir: /workspace/ops-repo
+    action: block
+    message: Recursive deletes are blocked.
+  - id: no-force-push
+    tool: terminal
+    command: '(^|[\s;&|(`])git\s[^;&|\n]*\bpush\s[^;&|\n]*?(?<=\s)(-[a-zA-Z]*f[a-zA-Z]*|--force(-with-lease)?(=\S*)?|\+[\w./-]+)(\s|$)'
+    unless_command: '^\s*git\s+push\s+(-f|--force)\s+origin\s+scratch/[\w./-]+\s*$'
+    action: block
+    message: Force-push is blocked.
+  - id: no-secret-reads
+    tool: [read_file, terminal]
+    path: ['**/.env', '**/config/vendor-api.yaml', '**/*.pem', '~/.ssh/**']
+    action: block
+    message: Secret files are off limits.
+  - id: ask-unresolved-reads
+    tool: terminal
+    command: '(^|[\s;&|(`])(cat|less|more|head|tail|cp|scp|rsync|tar|zip|base64|xxd|od|strings)\s'
+    path: ['**/.env', '**/config/vendor-api.yaml', '**/*.pem', '~/.ssh/**']
+    action: block
+    message: Secret files are off limits.
+    if_unresolved: approve
+  - id: ask-secret-searches
+    tool: terminal
+    command: '(?i)(^|[\s;&|(`])(grep|egrep|rg|ag|ack)\s[^;&|\n]*(api[_-]?key|secret|token|passw(or)?d|private[ _-]?key|AKIA)'
+    action: approve
+    message: Searching files for secrets needs a human.
+  - id: no-shell-uploads
+    tool: terminal
+    command: '(curl|wget)\s(?:[^|;&]*\s)?(-d|--data|-F|--form|-T|--upload-file|--post-data|--post-file)'
+    action: block
+    message: Uploads from the shell are blocked.
+  - id: no-raw-sockets
+    tool: terminal
+    command: '(^|[\s;&|(`])(nc|ncat|netcat|socat|telnet)\s|/dev/(tcp|udp)/'
+    action: block
+    message: Raw network connections from the shell are blocked.

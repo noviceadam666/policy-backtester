@@ -105,7 +105,7 @@ class Profile:
         if not self.legacy:
             self.db.execute("UPDATE sessions SET message_count = message_count + 2 WHERE id=?", (sid,))
 
-    def cron_run(self, job_id, name, commands, status="completed", end_reason="cron_complete") -> str:
+    def cron_run(self, job_id, name, commands, status="completed", end_reason="cron_complete", workdir=None) -> str:
         """One real-shaped cron run: session, admission, execution record, tool calls."""
         execution = uuid.uuid4().hex
         sid = self.session(source="cron", title=f"{name} · Nov 05 02:00", end_reason=end_reason)
@@ -117,7 +117,7 @@ class Profile:
             self.jobs.append({"id": job_id, "name": name})
         self.executions.append((execution, job_id, status))
         for command in commands:
-            self.call(sid, "terminal", {"command": command})
+            self.call(sid, "terminal", {"command": command, **({"workdir": workdir} if workdir else {})})
         return sid
 
     def write_cron_files(self):
@@ -150,7 +150,7 @@ def stage_story(profile: Profile) -> dict[str, str]:
     story = json.loads(STORY.read_text())
     for _ in range(story["nights"]):
         for job in story["jobs"]:
-            profile.cron_run(job["id"], job["name"], job["commands"])
+            profile.cron_run(job["id"], job["name"], job["commands"], workdir=job.get("workdir"))
     sessions = {}
     for spec in story["sessions"]:
         sid = profile.session(title=spec["title"])

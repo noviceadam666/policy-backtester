@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .index import open_index
-from .paths import Profile, discover_profiles
+from .paths import Profile, all_profiles, discover_profiles
 from .sourcedb import column_names, open_readonly, table_names
 
 # Argument values that are file or message bodies: matchers don't use them and they can hold secrets.
@@ -47,6 +47,14 @@ class IngestSummary:
     @property
     def new_calls(self) -> int:
         return sum(p.new_calls for p in self.profiles)
+
+
+@dataclass(frozen=True)
+class ScheduledJob:
+    kind: str
+    profile: str
+    job_id: str
+    name: str | None
 
 
 @dataclass(frozen=True)
@@ -309,20 +317,34 @@ def _read_admissions(source: sqlite3.Connection) -> dict[str, dict]:
     return {r["target_session_id"]: dict(r) for r in rows}
 
 
+def _read_jobs(home: Path) -> list[dict]:
+    try:
+        jobs = json.loads((home / "cron" / "jobs.json").read_text()).get("jobs", [])
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [j for j in jobs if isinstance(j, dict) and j.get("id")] if isinstance(jobs, list) else []
+
+
+def scheduled_jobs(root: Path, only: list[str] | None = None) -> list[ScheduledJob]:
+    """The cron jobs each profile has scheduled now: enabled in ``cron/jobs.json`` and not finished.
+
+    A profile counts even before it has a ``state.db``, since a new app's jobs are the ones with no
+    history. Kanban tasks are one-off work with no schedule to read, so only cron jobs are listed.
+    """
+    return [
+        ScheduledJob("cron", profile.name, str(job["id"]), job.get("name"))
+        for profile in all_profiles(root, only)
+        for job in _read_jobs(profile.home)
+        if job.get("enabled", True) is not False and job.get("state") != "completed"
+    ]
+
+
 class _CronLookup:
     """Job names from ``cron/jobs.json`` and run status from ``cron/executions.db``, when present."""
 
     def __init__(self, home: Path):
-        self._names = self._read_names(home / "cron" / "jobs.json")
+        self._names = {j["id"]: j.get("name") for j in _read_jobs(home)}
         self._statuses = self._read_statuses(home / "cron" / "executions.db")
-
-    @staticmethod
-    def _read_names(path: Path) -> dict[str, str]:
-        try:
-            jobs = json.loads(path.read_text()).get("jobs", [])
-        except (OSError, ValueError, AttributeError):
-            return {}
-        return {j["id"]: j.get("name") for j in jobs if isinstance(j, dict) and j.get("id")}
 
     @staticmethod
     def _read_statuses(path: Path) -> dict[str, str]:

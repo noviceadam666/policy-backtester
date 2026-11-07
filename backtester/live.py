@@ -2,7 +2,8 @@
 
 Hermes treats a ``pre_tool_call`` callback that raises or times out as a block, so shadow catches
 everything and never returns a directive: a bug here must not stop a job the backtest is measuring.
-Enforce fails closed when its policy can't load, as Hermes does for a policy hook that errors.
+Enforce fails closed when its policy can't load, as Hermes does for a policy hook that errors. Either
+way the call is logged with the reason, so ``log`` and ``status`` can say the policy isn't checking.
 
 The hook reads its settings on every call (Hermes caches the config file by signature), so promoting
 a policy takes effect on the next tool call. Files live in the profile's own ``backtest/`` folder:
@@ -113,14 +114,15 @@ class LiveGuard:
         if mode == "shadow":
             try:
                 self._decide("shadow", tool_name, args, task_id, session_id, tool_call_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log_failure("shadow", None, exc, tool_name, args, task_id, session_id, tool_call_id)
             return None
         if mode != "enforce":
             return None
         try:
             verdict = self._decide("enforce", tool_name, args, task_id, session_id, tool_call_id)
         except Exception as exc:
+            self._log_failure("enforce", "block", exc, tool_name, args, task_id, session_id, tool_call_id)
             return {"action": "block", "message": f"[{TAG}] The enforced policy couldn't be checked ({exc}), so this call is blocked."}
         if verdict is None or verdict.action is None:
             return None
@@ -149,17 +151,40 @@ class LiveGuard:
                 # Enforce still returns its verdict when the log can't be written.
         return verdict
 
+    def _log_failure(self, mode: str, action: str | None, exc: Exception, tool_name: str, args: Any, task_id: str,
+                     session_id: str, tool_call_id: str) -> None:
+        """Log a call the policy couldn't check: enforce blocked it, shadow let it through unchecked."""
+        try:
+            record = {
+                "ts": time.time(), "mode": mode, "policy": self._setting("policy_sha256", None), "tool": tool_name,
+                "action": action, "rules": [], "error": str(exc), "task_id": task_id or None,
+                "session_id": session_id or None, "tool_call_id": tool_call_id or None, "args": json.loads(_clean_args(args)),
+            }
+            with self._lock:
+                _append(live_dir(self._home()) / DECISIONS, record)
+        except Exception:
+            pass
+
     def _policy(self) -> Policy:
         path = self._setting("policy", None)
         expected = self._setting("policy_sha256", None)
         if not path:
             raise PolicyError("no policy promoted")
-        stat = Path(path).stat()
+        try:
+            stat = Path(path).stat()
+        except OSError as exc:
+            raise PolicyError(f"can't read policy {path}: {exc.strerror or exc}") from exc
         key = (str(path), stat.st_mtime_ns, stat.st_size, expected)
         if self._cached and self._cached[0] == key:
             return self._cached[1]
-        policy = load_policy(Path(path))
-        if expected and policy.hash != expected:
-            raise PolicyError(f"{path} changed after it was promoted")
+        policy = check_promoted(Path(path), expected)
         self._cached = (key, policy)
         return policy
+
+
+def check_promoted(path: Path, expected: str | None) -> Policy:
+    """Load a promoted policy copy, refusing one whose rules no longer hash to what was promoted."""
+    policy = load_policy(path)
+    if expected and policy.hash != expected:
+        raise PolicyError(f"{path} changed after it was promoted: its rules hash to {policy.hash[:12]}, not {expected[:12]}")
+    return policy

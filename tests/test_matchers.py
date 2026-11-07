@@ -95,3 +95,26 @@ def test_glob(glob, path, expected):
 def test_segments_ignore_quotes_on_purpose():
     command = 'bash -c "rm -rf ./cache/x; rm -rf /"'
     assert [command[a:b] for a, b in segment_spans(command)] == ['bash -c "rm -rf ./cache/x', ' rm -rf /"']
+
+
+def test_segment_folders_follow_workdir_and_cd_joined_by_and():
+    from backtester.matchers import segment_folders
+
+    command = "cd /srv && ls; cd app && pwd"
+    folders = list(segment_folders(command, "/home/x").values())
+    assert folders == ["/home/x", "/srv", "/srv", "/srv/app"]     # a cd after ; counts when && follows it
+    assert list(segment_folders("cd /srv; ls", "/a").values()) == ["/a", None]
+    assert list(segment_folders("ls", None).values()) == [None]
+    assert list(segment_folders("ls", "relative/dir").values()) == [None]
+    assert list(segment_folders("cd ~/w && ls", None).values()) == [None, "~/w"]
+
+
+def test_could_reach_narrows_only_plain_wildcards():
+    from backtester.matchers import could_reach
+
+    assert not could_reach("./cache/*", ["**/config/vendor-api.yaml"], None)
+    assert not could_reach("./cache/*", ["**/config/vendor-api.yaml"], "/srv")
+    assert could_reach("./cache/*", ["**/cache/*.yaml"], None)
+    assert could_reach("*.yaml", ["config/vendor-api.yaml"], "/repo/config") is False
+    assert could_reach("*.yaml", ["**/config/vendor-api.yaml"], "/repo/config")
+    assert could_reach("$X", ["/etc/shadow"], None) and could_reach("../*", ["/etc/shadow"], None)

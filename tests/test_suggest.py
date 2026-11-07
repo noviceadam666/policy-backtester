@@ -54,7 +54,10 @@ def test_suggest_on_naive_lands_on_refined(story):
         ("no-force-push", "release-job", ("git push --force origin scratch/release",)),
     ]
     rules = {r.id: r for r in proposal.rules}
-    assert rules["no-rm-rf"].unless_command.pattern == {r.id: r for r in REFINED.rules}["no-rm-rf"].unless_command.pattern
+    [entry] = rules["no-rm-rf"].unless
+    assert entry.command.pattern == {r.id: r for r in REFINED.rules}["no-rm-rf"].unless_command.pattern
+    assert entry.workdir == "/workspace/ops-repo"
+    assert [e.workdir for e in suggestion.exemptions] == ["/workspace/ops-repo"] * 2
     assert after.would_break == []
     refined = run_backtest(story, REFINED)
     diff = diff_results(refined, after)
@@ -62,13 +65,43 @@ def test_suggest_on_naive_lands_on_refined(story):
     assert [i.session_id for i in after.incidents] == [i.session_id for i in refined.incidents]
 
 
-def test_the_proposal_changes_only_unless_command_lines(story):
+def test_the_proposal_only_adds_unless_entries(story):
     _, text, *_ = propose(story, NAIVE, (POLICIES / "naive.yaml").read_text())
     naive = (POLICIES / "naive.yaml").read_text().splitlines()
-    added = [line for line in text.splitlines() if line not in naive and not line.startswith("#")]
+    added = [line.strip() for line in text.splitlines() if line not in naive and not line.startswith("#")]
     removed = [line for line in naive if line not in text.splitlines() and not line.startswith("#")]
-    assert len(added) == 2 and all(line.strip().startswith("unless_command:") for line in added)
+    assert added == ["unless:", r"- command: '^\s*rm\s+-rf\s+\./cache/\*\s*$'", "workdir: /workspace/ops-repo",
+                     "unless:", r"- command: '^\s*git\s+push\s+--force\s+origin\s+scratch/release\s*$'",
+                     "workdir: /workspace/ops-repo"]
     assert removed == []
+
+
+def test_the_pinned_exemption_holds_only_in_its_folder(story):
+    _, text, *_ = propose(story, NAIVE, (POLICIES / "naive.yaml").read_text())
+    proposal = load_proposal(text)
+    cleanup = "rm -rf ./cache/*"
+    assert evaluate(proposal, "terminal", {"command": cleanup, "workdir": "/workspace/ops-repo"}).action is None
+    assert evaluate(proposal, "terminal", {"command": f"cd /workspace/ops-repo && {cleanup}"}).action is None
+    for args in ({"command": cleanup, "workdir": "/"}, {"command": cleanup},
+                 {"command": f"cd / && {cleanup}", "workdir": "/workspace/ops-repo"},
+                 {"command": f"cd /workspace/ops-repo ; {cleanup}", "workdir": "/"},
+                 {"command": f"(cd /workspace/ops-repo) && {cleanup}"},
+                 {"command": f"pushd / && {cleanup}", "workdir": "/workspace/ops-repo"}):
+        assert evaluate(proposal, "terminal", args).action == "block", args
+
+
+def test_a_job_with_no_folder_shown_is_exempted_but_its_folder_is_left_for_a_human(fleet):
+    profile = fleet.profile("demo")
+    profile.cron_run("j1", "clean", ["rm -rf ./cache/*"], workdir="/srv/app")
+    profile.cron_run("j1", "clean", ["rm -rf ./cache/*"])
+    profile.write_cron_files()
+    index = indexed(fleet)
+    suggestion, text, _, after = propose(index, NAIVE, (POLICIES / "naive.yaml").read_text())
+    index.close()
+    assert [(e.segments, e.workdir) for e in suggestion.exemptions] == [(("rm -rf ./cache/*",), None)]
+    [review] = suggestion.for_review
+    assert review.exempted and "1 of 2 run(s) didn't show which folder" in review.reason
+    assert after.would_break == [] and "workdir" not in text
 
 
 @pytest.mark.parametrize("call,naive_ids,refined_ids", GOLDEN)
@@ -200,7 +233,7 @@ def test_cli_prints_the_proposal_and_never_touches_the_policy(fleet, capsys):
     out = capsys.readouterr().out
     assert "jobs broken      2       0" in out
     assert "Left for a human: none" in out
-    assert "unless_command: '^\\s*rm\\s+-rf\\s+\\./cache/\\*\\s*$'" in out
+    assert "- command: '^\\s*rm\\s+-rf\\s+\\./cache/\\*\\s*$'\n        workdir: /workspace/ops-repo" in out
     assert (POLICIES / "naive.yaml").read_text() == before
 
 
@@ -238,4 +271,4 @@ def test_cli_json_and_fail_on_break(fleet, capsys):
 def test_cli_says_when_there_is_nothing_to_suggest(fleet, capsys):
     stage_story(fleet.profile("demo"))
     assert run_cli(fleet, "suggest", str(POLICIES / "refined.yaml")) == 0
-    assert "Nothing to suggest: refined.yaml breaks no jobs" in capsys.readouterr().out
+    assert "Nothing to suggest: refined.yaml breaks no jobs that ran" in capsys.readouterr().out

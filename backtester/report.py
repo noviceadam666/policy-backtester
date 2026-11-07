@@ -51,11 +51,45 @@ def _table(rows: list[list[str]], indent: str = "  ") -> list[str]:
     return [indent + "  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip() for r in rows]
 
 
+def span(seconds: float) -> str:
+    """A length of time in the unit that reads best: minutes, hours, then days."""
+    if seconds < 3600:
+        return f"{max(1, round(seconds / 60))} minute(s)"
+    if seconds < 2 * 86400:
+        return f"{seconds / 3600:.1f} hours"
+    return f"{seconds / 86400:.1f} days"
+
+
 def _coverage(result: BacktestResult) -> str:
     if result.oldest_call is None:
         return "no calls in this window"
-    days = (result.newest_call - result.oldest_call) / 86400
-    return f"{_when(result.oldest_call)} to {_when(result.newest_call)} ({days:.1f} days of history)"
+    return f"{_when(result.oldest_call)} to {_when(result.newest_call)} ({span(result.newest_call - result.oldest_call)} of history)"
+
+
+def _jobs_line(result: BacktestResult) -> list[str]:
+    if result.scheduled is None:
+        return []
+    if not result.scheduled:
+        return ["Jobs     none scheduled"]
+    ran = len(result.scheduled) - len(result.cant_vouch)
+    return [f"Jobs     {len(result.scheduled)} scheduled, {ran} with a completed run in this window"]
+
+
+def cant_vouch_names(result: BacktestResult) -> list[str]:
+    return [j.name or j.job_id for j in result.cant_vouch]
+
+
+def cant_vouch_lines(result: BacktestResult, aggregate: bool = False) -> list[str]:
+    if not result.cant_vouch:
+        return []
+    lines = ["", f"Can't vouch for: {len(result.cant_vouch)} scheduled job(s) with no completed run in this window"]
+    if aggregate:
+        counts = Counter(j.profile for j in result.cant_vouch)
+        lines.append("  " + ", ".join(f"{profile} {n}" for profile, n in sorted(counts.items())))
+    else:
+        lines += [f"  {j.name or j.job_id} ({j.kind}, {j.profile})" for j in result.cant_vouch]
+    return lines + ["  The backtest never saw them run, so it can't say whether this policy breaks them. Shadow it",
+                    "  until each has completed a run, then backtest again."]
 
 
 def render_table(result: BacktestResult, redacted: bool = True, aggregate: bool = False) -> str:
@@ -64,16 +98,19 @@ def render_table(result: BacktestResult, redacted: bool = True, aggregate: bool 
         f"History  {_coverage(result)}",
         f"Replayed {result.calls_replayed} calls in {result.sessions_replayed} sessions"
         f" across {len(result.profiles)} profile(s)",
-        "",
-        "Rules",
+        *_jobs_line(result),
     ]
+    if aggregate:
+        lines.append("Counts only (--aggregate): job names, commands and session titles are hidden.")
+    lines += ["", "Rules"]
     rows = [["id", "action", "hits", "would-block", "would-escalate", "incidents"]]
     rows += [[r.id, r.action, str(r.hits), str(r.would_block), str(r.would_escalate), str(r.incidents)] for r in result.rules]
     lines += _table(rows)
     lines += _rule_notes(result)
     if result.calls_replayed == 0:
-        lines += ["", "No tool calls in this window yet. Hermes records them as your agents work; to see the",
-                  "whole story on a synthetic fleet now, run: hermes backtest demo"]
+        lines += ["", "No tool calls in this window, so this backtest checked nothing and a clean result means",
+                  "nothing yet. Hermes records calls as your agents work; to see the whole story on a synthetic",
+                  "fleet now, run: hermes backtest demo"]
     if any(c.after_first_stop for c in result.decisions.values()):
         lines += ["", "Caught sessions and job runs are exact. Calls marked 'after first stop' are what the agent did",
                   "with nothing blocked, so the call counts above are upper bounds."]
@@ -86,6 +123,7 @@ def render_table(result: BacktestResult, redacted: bool = True, aggregate: bool 
     lines += ["", f"Would break: {len(result.would_break)} job(s)"]
     for job in result.would_break:
         lines += _job_lines(job, redacted, aggregate)
+    lines += cant_vouch_lines(result, aggregate)
     return "\n".join(lines)
 
 
@@ -155,9 +193,13 @@ def to_json(result: BacktestResult, redacted: bool = True, aggregate: bool = Fal
         ],
         "caught": len(result.incidents),
         "would_break": len(result.would_break),
+        "scheduled_jobs": None if result.scheduled is None else len(result.scheduled),
+        "cant_vouch": len(result.cant_vouch),
     }
     if aggregate:
+        report["cant_vouch_by_profile"] = dict(sorted(Counter(j.profile for j in result.cant_vouch).items()))
         return report
+    report["cant_vouch_jobs"] = _cant_vouch_json(result)
     report["incidents"] = [
         {
             "profile": i.profile,
@@ -185,6 +227,10 @@ def to_json(result: BacktestResult, redacted: bool = True, aggregate: bool = Fal
     return report
 
 
+def _cant_vouch_json(result: BacktestResult) -> list[dict]:
+    return [{"kind": j.kind, "profile": j.profile, "job_id": j.job_id, "job": j.name or j.job_id} for j in result.cant_vouch]
+
+
 def _diff_group(title: str, hits: list[CallHit], redacted: bool) -> list[str]:
     lines = [f"{title}: {len(hits)} call(s)"]
     for sample, count in Counter(f"{c.profile}  {', '.join(c.rule_ids)}  {c.tool}: {describe_call(c, redacted)}" for c in hits).items():
@@ -203,6 +249,7 @@ def render_diff(diff: PolicyDiff, redacted: bool = True) -> str:
         f"Before  {_policy_label(old, redacted)}  (sha256 {old.policy.hash[:12]})",
         f"After   {_policy_label(new, redacted)}  (sha256 {new.policy.hash[:12]})",
         f"History {_coverage(new)}",
+        *[line.replace("Jobs     ", "Jobs    ", 1) for line in _jobs_line(new)],
         "",
     ]
     lines += _table(rows)
@@ -211,6 +258,7 @@ def render_diff(diff: PolicyDiff, redacted: bool = True) -> str:
     lines += _diff_group("Newly broken", diff.newly_broken, redacted)
     lines += _diff_group("No longer matched", diff.no_longer_matched, redacted)
     lines.append(f"Unchanged: {len(diff.still_caught)} caught, {len(diff.still_broken)} still breaking")
+    lines += cant_vouch_lines(new)
     return "\n".join(lines)
 
 
@@ -226,6 +274,8 @@ def diff_to_json(diff: PolicyDiff, redacted: bool = True) -> dict:
         "before": {"source": _policy_label(diff.old, redacted), "sha256": diff.old.policy.hash, "caught": len(diff.old.incidents), "would_break": len(diff.old.would_break)},
         "after": {"source": _policy_label(diff.new, redacted), "sha256": diff.new.policy.hash, "caught": len(diff.new.incidents), "would_break": len(diff.new.would_break)},
         **{name: [_hit_json(c, redacted) for c in hits] for name, hits in groups.items()},
+        "cant_vouch": len(diff.new.cant_vouch),
+        "cant_vouch_jobs": _cant_vouch_json(diff.new),
     }
 
 
@@ -239,14 +289,14 @@ def render_suggestion(suggestion, diff: PolicyDiff, redacted: bool = True) -> st
         f"Suggest  {_policy_label(diff.old, redacted)}  (sha256 {diff.old.policy.hash[:12]})",
         f"History  {_coverage(diff.old)}",
         "",
-        "Exemptions, each pinned to the exact command its job ran",
+        "Exemptions, each pinned to the exact command its job ran, and to its folder when every run shows one",
     ]
     width = max((len(x.rule_id) for x in [*suggestion.exemptions, *suggestion.for_review]), default=0)
     if not suggestion.exemptions:
         lines.append("  none")
     for e in suggestion.exemptions:
         lines.append(f"  {e.rule_id:{width}s}  {job_label(e.job, redacted)} ({e.job.kind}, {e.job.profile}),"
-                     f" {e.runs_hit} of {e.job.completed_runs} completed runs")
+                     f" {e.runs_hit} of {e.job.completed_runs} completed runs" + (f", in {e.workdir}" if e.workdir else ""))
         lines += [f"  {'':{width}s}    {_segment(segment, redacted)}" for segment in e.segments]
     lines.append("Left for a human" + ("" if suggestion.for_review else ": none"))
     for r in suggestion.for_review:
@@ -263,12 +313,13 @@ def suggestion_to_json(suggestion, diff: PolicyDiff, policy_yaml: str | None, re
     return {
         "exemptions": [
             {"rule": e.rule_id, "job": job_label(e.job, redacted), "kind": e.job.kind, "profile": e.job.profile,
-             "runs_hit": e.runs_hit, "completed_runs": e.job.completed_runs,
+             "runs_hit": e.runs_hit, "completed_runs": e.job.completed_runs, "workdir": e.workdir,
              "commands": [_segment(segment, redacted) for segment in e.segments]}
             for e in suggestion.exemptions
         ],
         "for_review": [
-            {"rule": r.rule_id, "job": job_label(r.job, redacted), "kind": r.job.kind, "profile": r.job.profile, "reason": r.reason}
+            {"rule": r.rule_id, "job": job_label(r.job, redacted), "kind": r.job.kind, "profile": r.job.profile, "reason": r.reason,
+             "exempted": r.exempted}
             for r in suggestion.for_review
         ],
         "diff": diff_to_json(diff, redacted),

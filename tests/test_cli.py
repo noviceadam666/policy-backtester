@@ -141,7 +141,7 @@ def test_bundled_policies_work_from_anywhere(staged, tmp_path, monkeypatch, caps
     assert "jobs broken      2       0" in capsys.readouterr().out
     assert run_cli(staged, "run", "policies/nope.yaml", "--no-ingest") == 1
     err = capsys.readouterr().err
-    assert "bundled policies are naive.yaml, refined.yaml, strict.yaml, tools.yaml" in err
+    assert "bundled policies are hardened.yaml, naive.yaml, refined.yaml, strict.yaml, tools.yaml" in err
 
 
 def test_a_local_policy_file_wins_over_a_bundled_one(staged, tmp_path, monkeypatch, capsys):

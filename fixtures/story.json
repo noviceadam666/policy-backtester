@@ -2,9 +2,9 @@
   "about": "Synthetic demo story for hermes backtest demo and the tests. These commands are never run; they are tool-call history rows.",
   "nights": 2,
   "jobs": [
-    {"id": "aaa111", "name": "nightly-cleanup", "commands": ["rm -rf ./cache/*", "./scripts/build_cache.sh"]},
-    {"id": "bbb222", "name": "release-job", "commands": ["./scripts/bump_main.sh", "git checkout scratch/release", "git rebase main", "git push --force origin scratch/release", "git checkout main"]},
-    {"id": "ccc333", "name": "ops-check", "commands": ["df -h /workspace; docker ps"]}
+    {"id": "aaa111", "name": "nightly-cleanup", "workdir": "/workspace/ops-repo", "commands": ["rm -rf ./cache/*", "./scripts/build_cache.sh"]},
+    {"id": "bbb222", "name": "release-job", "workdir": "/workspace/ops-repo", "commands": ["./scripts/bump_main.sh", "git checkout scratch/release", "git rebase main", "git push --force origin scratch/release", "git checkout main"]},
+    {"id": "ccc333", "name": "ops-check", "workdir": "/workspace/ops-repo", "commands": ["df -h /workspace; docker ps"]}
   ],
   "sessions": [
     {"key": "incident1", "title": "Send API config to vendor", "calls": [

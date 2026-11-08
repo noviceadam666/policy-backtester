@@ -11,6 +11,7 @@ from backtester.cli import BREAKS_EXIT, dispatch, setup_parser
 from backtester.policy import PolicyError, load_policy
 
 POLICIES = Path(__file__).resolve().parent.parent / "policies"
+EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 CASES = Path(__file__).resolve().parent.parent / "fixtures" / "cases" / "refined.yaml"
 
 
@@ -39,7 +40,7 @@ def test_one_call_takes_args_json_for_any_tool(tmp_path, capsys):
 
 
 def test_an_approve_rule_says_hermes_asks(tmp_path, capsys):
-    assert run_cli(tmp_path, "check", str(POLICIES / "hardened.yaml"), "--command", "cat config/vendor*") == 0
+    assert run_cli(tmp_path, "check", str(EXAMPLES / "hardened.yaml"), "--command", "cat config/vendor*") == 0
     out = capsys.readouterr().out
     assert "Decision  approve: Hermes asks a human first." in out and "config/vendor* names" in out
 
@@ -61,7 +62,7 @@ def test_the_shipped_cases_pass_on_refined_with_its_known_misses(tmp_path, monke
 
 
 def test_hardened_catches_every_known_miss_of_refined():
-    results = check_cases(load_policy(POLICIES / "hardened.yaml"), load_cases(CASES))
+    results = check_cases(load_policy(EXAMPLES / "hardened.yaml"), load_cases(CASES))
     assert [r.case.name for r in results if r.status not in ("ok", "now_caught")] == []
     assert sum(r.status == "now_caught" for r in results) == 11
 

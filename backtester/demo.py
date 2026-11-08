@@ -1,7 +1,8 @@
 """``hermes backtest demo``: the whole story on a synthetic fleet in about a second, touching nothing real.
 
-It runs the same code paths as the real commands (ingest, run, diff, shadow, enforce, log, the live
-hook) against a throwaway Hermes-shaped folder, and exits non-zero if the story doesn't come out.
+It runs the same code paths as the real commands (ingest, run, suggest, shadow, enforce, log, the live
+hook and its built-in guard rules) against a throwaway Hermes-shaped folder, and exits non-zero if the
+story doesn't come out.
 """
 
 from __future__ import annotations
@@ -131,6 +132,13 @@ def _story(root: Path, kept: bool) -> int:
     checks.append(("enforce blocks the upload", bool(blocked) and blocked.get("action") == "block"))
     checks.append(("enforce leaves the cleanup alone", cleanup is None))
     checks.append(("enforce still blocks that command from another folder", bool(elsewhere) and elsewhere.get("action") == "block"))
+
+    switch_off = guard(tool_name="terminal", args={"command": f"hermes -p {PROFILE} backtest off"}, session_id="chat-2")
+    _step("7. Blocked, the agent tries to switch its guard off", f"It runs: hermes -p {PROFILE} backtest off\nHermes gets:\n  "
+          + str(switch_off) + f"\nThe mode is still {live.get('mode')}. A built-in rule rides along with every policy;"
+          " only a person changes the guard.")
+    checks.append(("enforce stops the agent switching its own guard off",
+                   bool(switch_off) and switch_off.get("action") == "block" and live.get("mode") == "enforce"))
 
     _step("Checks", "\n".join(f"  {'ok  ' if ok else 'FAIL'}  {name}" for name, ok in checks))
     failed = [name for name, ok in checks if not ok]

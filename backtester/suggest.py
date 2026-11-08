@@ -25,6 +25,7 @@ from ruamel.yaml.scalarstring import SingleQuotedScalarString
 
 from .engine import BacktestResult, JobBreak
 from .evaluator import evaluate, stopping_segments
+from .guard import is_guard
 from .policy import Policy, parse_policy
 
 
@@ -77,6 +78,10 @@ def suggest(result: BacktestResult) -> Suggestion:
         for call in job.calls:
             for hit in evaluate(policy, call.tool, call.args, call.profile).hits:
                 if hit.action not in ("block", "approve"):
+                    continue
+                if is_guard(hit.id):
+                    unexemptable.setdefault(hit.id, "it's a built-in guard rule, so no policy can exempt it: run that"
+                                            " step yourself, outside the agent")
                     continue
                 segments = stopping_segments(rules[hit.id], call.args)
                 if segments is None:

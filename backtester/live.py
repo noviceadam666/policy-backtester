@@ -4,6 +4,7 @@ Hermes treats a ``pre_tool_call`` callback that raises or times out as a block, 
 everything and never returns a directive: a bug here must not stop a job the backtest is measuring.
 Enforce fails closed when its policy can't load, as Hermes does for a policy hook that errors. Either
 way the call is logged with the reason, so ``log`` and ``status`` can say the policy isn't checking.
+In both modes the built-in guard rules ride along (see ``guard.py``), so an agent can't switch it off.
 
 The hook reads its settings on every call (Hermes caches the config file by signature), so promoting
 a policy takes effect on the next tool call. Files live in the profile's own ``backtest/`` folder:
@@ -21,7 +22,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .evaluator import evaluate
+from .guard import with_guard
 from .ingest import _clean_args
+from .paths import root_of
 from .policy import Policy, PolicyError, load_policy
 
 MODES = ("off", "shadow", "enforce")
@@ -177,7 +180,7 @@ class LiveGuard:
         key = (str(path), stat.st_mtime_ns, stat.st_size, expected)
         if self._cached and self._cached[0] == key:
             return self._cached[1]
-        policy = check_promoted(Path(path), expected)
+        policy = with_guard(check_promoted(Path(path), expected), root_of(self._home()))
         self._cached = (key, policy)
         return policy
 

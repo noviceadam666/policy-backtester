@@ -1,4 +1,4 @@
-"""Policy Backtester: replay a guardrail policy over real tool-call history, then shadow and enforce it."""
+"""Policy Backtester: a test harness for Hermes guardrails. Replay a policy over real tool-call history, then shadow and enforce it."""
 
 from pathlib import Path
 
@@ -37,8 +37,8 @@ def register(ctx):
     ctx.register_hook("pre_tool_call", policy_backtester_pre_tool_call)
     ctx.register_cli_command(
         "backtest",
-        help="Backtest guardrail policies against real tool-call history, then shadow and enforce them",
+        help="Test a guardrail against this profile's real work (try), then shadow and enforce it",
         setup_fn=setup_parser,
         handler_fn=lambda args: dispatch(args, settings),
-        description="Read every profile's history read-only, replay a policy over it, then shadow or enforce it here.",
+        description="Read this profile's history read-only, replay a policy over it, then shadow or enforce it here.",
     )

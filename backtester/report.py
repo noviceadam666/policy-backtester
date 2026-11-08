@@ -92,12 +92,13 @@ def cant_vouch_lines(result: BacktestResult, aggregate: bool = False) -> list[st
                     "  until each has completed a run, then backtest again."]
 
 
-def render_table(result: BacktestResult, redacted: bool = True, aggregate: bool = False) -> str:
+def render_table(result: BacktestResult, redacted: bool = True, aggregate: bool = False, scope: str | None = None) -> str:
     lines = [
         f"Policy   {_policy_label(result, redacted)}  (sha256 {result.policy.hash[:12]})",
         f"History  {_coverage(result)}",
         f"Replayed {result.calls_replayed} calls in {result.sessions_replayed} sessions"
         f" across {len(result.profiles)} profile(s)",
+        *([f"Scope    {scope}"] if scope else []),
         *_jobs_line(result),
     ]
     if aggregate:
@@ -125,6 +126,31 @@ def render_table(result: BacktestResult, redacted: bool = True, aggregate: bool 
         lines += _job_lines(job, redacted, aggregate)
     lines += cant_vouch_lines(result, aggregate)
     return "\n".join(lines)
+
+
+def render_brief(result: BacktestResult, redacted: bool = True) -> list[str]:
+    """``try``'s answer on one screen: the jobs a policy would break, the sessions it would catch, and
+    the jobs it can't vouch for. ``run`` has the full table."""
+    broken = {(j.profile, j.job_id) for j in result.would_break}
+    unvouched = {(j.profile, j.job_id) for j in result.cant_vouch}
+    untouched = [j.name or j.job_id for j in result.scheduled or []
+                 if (j.profile, j.job_id) not in broken | unvouched]
+    lines = [f"Would break   {len(result.would_break)} job(s)"
+             + (f". Ran untouched: {', '.join(untouched)}" if untouched else "")]
+    for job in result.would_break:
+        lines += _job_lines(job, redacted, False)
+    lines.append(f"Would catch   {len(result.incidents)} session(s)")
+    for incident in result.incidents:
+        first = incident.calls[0]
+        more = f"  (+{len(incident.calls) - 1} more call(s))" if len(incident.calls) > 1 else ""
+        lines.append(f"  {_when(first.ts)}  {incident.source or '?'}  {first.action}  {', '.join(incident.rule_ids)}"
+                     f"  {first.tool}: {describe_call(first, redacted)}{more}")
+    if result.cant_vouch:
+        lines.append(f"Can't vouch   {len(result.cant_vouch)} scheduled job(s) with no completed run in this window: "
+                     + ", ".join(cant_vouch_names(result)))
+    if result.calls_replayed == 0:
+        lines.append("No tool calls in this window, so this checked nothing yet. Shadow will watch the calls to come.")
+    return lines
 
 
 def _rule_notes(result: BacktestResult) -> list[str]:

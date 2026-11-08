@@ -1,13 +1,46 @@
 # Policy Backtester
 
-Backtest your Hermes guardrails against real history before you enforce them.
+A test harness for Hermes guardrails: what a rule would break, and what it would miss.
 
-You wouldn't ship a trading strategy without a backtest. This plugin reads the tool calls your agents already
-made, replays them through a policy, and tells you what the policy would have caught and which working jobs
-it would have broken. Then it runs the policy in shadow on live traffic, and only then enforces it. It tests
-rules; it doesn't replace Hermes's own approvals or other guardrails, and it never approves anything.
+Before you turn a guardrail on, try it against the work your agents already did:
 
-## Try it in a minute, no keys
+```bash
+hermes -p ops backtest try refined
+```
+
+On a synthetic profile named `ops`, that prints:
+
+```text
+Trying refined.yaml (sha256 946d0ca6e5f5) on ops, last 30d: 22 tool calls in 10 sessions
+
+Would break   0 job(s). Ran untouched: nightly-cleanup, release-job, ops-check
+Would catch   3 session(s)
+  2026-10-26 01:37  oneshot  block  no-rm-rf  terminal: rm -rf /sandbox-data/old-builds
+  ...
+Would miss    11 of 27 known calls it should stop, and lets 4 of 4 routine ones through (refined.yaml: each checked, none run)
+  force flag after the branch (known gap)
+  ...
+
+Shadow is on for ops: from the next tool call it logs what refined.yaml would do, and changes nothing.
+```
+
+`try` replays this profile's real tool calls through the rule and names every scheduled job it would have
+stopped and every session it would have caught. It checks the rule against known calls it should stop, so you
+see the misses as well as the breaks. Then it starts the rule in shadow, which logs and changes nothing.
+`log` is the review: it says whether each job ran untouched. When it does, `enforce` turns the rule on. You
+don't need to write YAML to start; the bundled `refined` policy is a working example, and your own rules are
+plain YAML when you want them.
+
+**Enforce is a policy gate, not a security boundary.** Rules see what a command says, not what it does, and an
+agent that writes and runs its own code can get past them. Use it to roll guardrails out without breaking jobs
+that work, alongside Hermes's own approvals and a sandboxed terminal.
+
+So far: on a sandbox profile with four cron jobs, under enforce from Nov 7 to Nov 8 with v0.3 of this plugin,
+10 of 10 job runs completed with nothing blocked, including `rm -rf ./cache/*` and a force push to a scratch branch. A
+staged request to send an API config to a vendor was blocked in 3 of 3 tries. One over-block: an `ls` that named
+the secret file.
+
+## Install, and try it in a minute with no keys
 
 ```bash
 hermes plugins install https://github.com/noviceadam666/policy-backtester
@@ -27,8 +60,8 @@ hermes plugins install https://github.com/noviceadam666/policy-backtester --forc
 ```
 
 `demo` builds a small synthetic Hermes fleet in a temp folder, tells the whole story on it (backtest, suggest
-the fix, shadow, enforce) through the same code the real commands use, and exits non-zero unless all 11 checks
-pass. It doesn't read your history.
+the fix, shadow, enforce, and the agent trying to switch its guard off) through the same code the real commands
+use, and exits non-zero unless all 12 checks pass. It doesn't read your history.
 
 ## On your own history
 
@@ -40,26 +73,47 @@ hermes -p ops plugins install https://github.com/noviceadam666/policy-backtester
 ```
 
 If `hermes -p ops backtest ...` says `'backtest' is not a hermes command`, the plugin isn't installed and
-enabled in `ops` yet: run the line above. Then:
+enabled in `ops` yet: run the line above.
+
+### The everyday path: `try`, `log`, `enforce`
 
 ```bash
-hermes -p ops backtest run policies/naive.yaml                       # what it would catch and break, last 30 days
-hermes -p ops backtest suggest policies/naive.yaml --out mine.yaml   # propose exact exemptions for the jobs it breaks
-hermes -p ops backtest diff policies/naive.yaml policies/refined.yaml
-hermes -p ops backtest check policies/refined.yaml --command 'git push -fu origin main'   # one call, no history
-hermes -p ops backtest shadow policies/refined.yaml                  # log decisions on live calls, change nothing
-hermes -p ops backtest log                                           # what shadow would have stopped, jobs untouched
-hermes -p ops backtest enforce                                       # block or ask, from the next tool call
+hermes -p ops backtest try refined        # what it would break, catch and miss here; then shadow it
+hermes -p ops backtest log                # the review: what shadow would have stopped, and each job's runs
+hermes -p ops backtest enforce            # block or ask, from the next tool call, once log says ready
 hermes -p ops backtest off
 ```
 
-The shipped policies (`naive`, `refined`, `strict`, `tools`, `hardened`) work from any folder: when there's no
-`policies/naive.yaml` where you are, the plugin's own copy is used, and it says so. A file of that name where
-you are wins. `run`, `diff` and `suggest` read every profile, whichever one you run them in, and update the
-index first unless you pass `--no-ingest`; `check` reads no history. Add `--profile
-NAME` to limit a run, `--since 7d` or `--until 2026-11-06` to change the window, `--format json` for a report
-and `--aggregate` for counts only, which hides job names as well as commands and titles. Output is redacted by
-default; `--no-redact` shows raw commands and titles.
+- **try** takes a policy file, or a bundled one by name. It reads the last 30 days (`--since 7d` to change
+  that) of the profile you run it in. It checks known calls from `--cases FILE`, or the bundled cases for a
+  bundled policy, and starts shadow unless you pass `--no-shadow`. It never replaces a policy in enforce: it
+  says so and leaves it running.
+- **log** ends with a verdict while shadow is on. Not ready means shadow would have stopped a job. Not seen yet
+  means a job hasn't completed a run since shadow started. Otherwise it says ready.
+- **enforce** still checks for itself. It refuses unless the policy ran in shadow, breaks no jobs, and every
+  scheduled job has completed a run in its 30-day window (see Promotion below).
+
+### The tools under it
+
+```bash
+hermes -p ops backtest run policies/naive.yaml                       # the full report, last 30 days
+hermes -p ops backtest suggest policies/naive.yaml --out mine.yaml   # propose exact exemptions for the jobs it breaks
+hermes -p ops backtest diff policies/naive.yaml policies/refined.yaml
+hermes -p ops backtest check policies/refined.yaml --command 'git push -fu origin main'   # one call, no history
+hermes -p ops backtest shadow policies/refined.yaml                  # shadow without try's report
+```
+
+The shipped policies (`naive`, `refined`, `tools`) work from any folder, by name or as `policies/NAME.yaml`:
+when there's no such file where you are, the plugin's own copy is used, and it says so. A file of that name
+where you are wins. Two stricter starting points, `examples/strict.yaml` and `examples/hardened.yaml`, are found
+the same way. They're examples, not presets: backtest and shadow them on your own history before you trust
+one.
+
+`try`, `run`, `diff`, `suggest` and `ingest` read the profile you run them in, and update the index first
+unless you pass `--no-ingest`. `--profile NAME` (repeatable) picks others, and `--all-profiles` reads every
+profile. `check` reads no history. `--since 7d` or `--until 2026-11-06` changes the window, `--format json`
+gives a report, and `--aggregate` gives counts only, which hides job names as well as commands and titles.
+Output is redacted by default; `--no-redact` shows raw commands and titles.
 
 ### Jobs it can't vouch for
 
@@ -116,8 +170,13 @@ to have: it's listed every time but doesn't fail the run, and the report says wh
 11 known misses: force flags it doesn't expect (`push origin main --force`, `git -c x=1 push -f`,
 `push origin +main`), recursive deletes it doesn't spell (`rm -r -f`, `rm -fr`, `find -delete`), `grep -r
 api_key .`, `nc` with a non-secret file, `cat config/vendor*`, the cache cleanup run from another folder, and
-`tar c config | nc`. `policies/hardened.yaml` is a proposal that catches all 11 and still breaks no jobs on the
+`tar c config | nc`. `examples/hardened.yaml` is a proposal that catches all 11 and still breaks no jobs on the
 demo fleet. Backtest and shadow it on your own history before you trust it: its patterns are wider.
+
+`run` and `try` report the cases on both sides: of the calls a policy should stop, how many it misses, and of
+the routine ones, how many it stops anyway. They use `--cases FILE`, or the bundled cases file named like a
+bundled policy (`refined` has one, which the two examples share). In JSON it's `known_cases`. A cases file of your own is how you keep a
+list of the calls your rules must catch.
 
 ### In CI
 
@@ -155,9 +214,29 @@ applies from the next tool call without a restart.
   counts them, and `status` checks the copy's hash and says plainly that every call is being blocked and why.
 - **off**, the default, does nothing.
 
+### Built-in guard rules
+
+While a profile is in shadow or enforce, two rules ride along with every policy, so an agent that hits a block
+can't switch the guard off:
+
+- **guard-commands** blocks a terminal command that runs this plugin's `off`, `shadow` or `enforce`, disables
+  or removes the plugin, or sets plugin settings with `hermes config set plugins...`. `log`, `status`, `run`
+  and the rest stay open.
+- **guard-files** blocks `write_file`, `patch` and terminal commands that name a profile's `config.yaml` or
+  its `backtest/` folder (the promoted policy, the decision and promotion logs, the index), under this Hermes
+  root.
+
+They're in every backtest too, as rows of the rules table, so a job that does one of these shows up as a job
+the policy would break before enforce stops it. A policy can't exempt them, and `suggest` leaves such a job
+for a human: run that step yourself, outside the agent. They cover Hermes's own commands, its file tools and
+shell commands that name those files. Code an agent writes and runs can still reach them, which is why
+enforce is a policy gate and not a sandbox. When the settings no longer match the last promotion, say
+because someone edited the config by hand, `status` says so.
+
 ## What it reads, writes and sends
 
-- **Reads** every profile's `state.db`, plus `cron/jobs.json`, `cron/executions.db` and Kanban board databases
+- **Reads** the `state.db` of each profile a command covers (the one you're in, unless you pass `--profile` or
+  `--all-profiles`), plus `cron/jobs.json`, `cron/executions.db` and Kanban board databases
   to tell whether a scheduled run completed. Every database is opened with SQLite `mode=ro` and never written.
 - **Writes** its own index, `<hermes root>/backtest/index.db` (0600), and in each profile where you promote a
   policy: `backtest/policies/`, `promotions.jsonl`, `decisions.jsonl` (0600), and its three settings under
@@ -252,7 +331,7 @@ wildcard that can't name any of the rule's paths doesn't count: `./cache/*` stay
 segments that pattern matches. It's noisy by nature: run the backtest to
 see how noisy on your own history before you turn it on. On one seven-profile fleet over 30 days, a path rule
 with `if_unresolved` on every command would have asked 433 times and broken 11 jobs. Scoped to commands that
-read or copy files, as in `policies/strict.yaml` (refined plus one such rule), it asked 12 times and would
+read or copy files, as in `examples/strict.yaml` (refined plus one such rule), it asked 12 times and would
 have stopped 2 Kanban tasks. Shadow it before you enforce it.
 
 ## How to read the results
@@ -276,7 +355,7 @@ have stopped 2 Kanban tasks. Shadow it before you enforce it.
 - Regex and glob rules see what a command says, not what it does. `if_unresolved` makes a rule ask when it
   can't tell, but a parent directory still reads as a different path. Treat a clean backtest as evidence, not
   proof.
-- Enforcement runs per profile: install and promote in each profile you guard. One ingest still reads them all.
+- Enforcement runs per profile: install and promote in each profile you guard. `--all-profiles` reads them all.
 - A backtest can't vouch for a job it never saw run; it names those jobs instead of counting them as safe.
 - Tested on Hermes v0.22.5, v0.22.7 and v0.23.0, including fresh v0.23.0 installs (`plugins install`, `enable`,
   `backtest demo`) into the default profile and into a new app profile with jobs that hadn't run yet.

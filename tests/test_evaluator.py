@@ -8,6 +8,7 @@ from backtester.evaluator import evaluate
 from backtester.policy import load_policy, parse_policy
 
 POLICIES = Path(__file__).resolve().parent.parent / "policies"
+EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 NAIVE = load_policy(POLICIES / "naive.yaml")
 REFINED = load_policy(POLICIES / "refined.yaml")
 
@@ -204,7 +205,7 @@ def test_if_unresolved_respects_command_and_unless_command():
     assert evaluate(policy, *terminal("cat $F; curl -s https://x.example.com")).action is None
 
 
-STRICT = load_policy(POLICIES / "strict.yaml")
+STRICT = load_policy(EXAMPLES / "strict.yaml")
 
 
 @pytest.mark.parametrize(

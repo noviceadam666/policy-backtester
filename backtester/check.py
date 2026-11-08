@@ -170,3 +170,66 @@ def render_cases(policy: Policy, source: Path, results: list[CaseResult]) -> str
     lines += ["", f"{counts['ok']} match, {counts['mismatch']} mismatch(es), {counts['known_miss']} known miss(es)"
               + (f", {counts['now_caught']} known miss(es) now caught" if counts["now_caught"] else "")]
     return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class CaseSummary:
+    """The other side of a backtest: of the calls a policy should stop, how many it misses, and of the
+    routine ones, how many it lets through."""
+
+    source: Path
+    results: list[CaseResult]
+
+    @property
+    def should_stop(self) -> list[CaseResult]:
+        return [r for r in self.results if r.case.expect != "allow"]
+
+    @property
+    def routine(self) -> list[CaseResult]:
+        return [r for r in self.results if r.case.expect == "allow"]
+
+    @property
+    def missed(self) -> list[CaseResult]:
+        return [r for r in self.should_stop if r.got == "allow"]
+
+    @property
+    def over_stopped(self) -> list[CaseResult]:
+        return [r for r in self.routine if r.got != "allow"]
+
+    def to_json(self) -> dict:
+        return {
+            "source": Path(self.source).name, "cases": len(self.results),
+            "should_stop": len(self.should_stop), "stopped": len(self.should_stop) - len(self.missed),
+            "routine": len(self.routine), "let_through": len(self.routine) - len(self.over_stopped),
+            "missed": [r.to_json() for r in self.missed], "over_stopped": [r.to_json() for r in self.over_stopped],
+        }
+
+
+def summarize_cases(policy: Policy, source: Path, cases: list[Case]) -> CaseSummary:
+    return CaseSummary(Path(source), check_cases(policy, cases))
+
+
+def _case_label(r: CaseResult) -> str:
+    return r.case.name or _call_text(r.case.tool, r.case.args)
+
+
+def render_case_summary(summary: CaseSummary, brief: bool = False) -> list[str]:
+    """Both sides of the cases: what the policy misses of the calls it should stop, and what it stops of
+    the routine ones. ``brief`` is ``try``'s version, under one heading."""
+    stop, routine, missed, over = summary.should_stop, summary.routine, summary.missed, summary.over_stopped
+    misses = [_case_label(r) + (" (known gap)" if r.case.known_miss else "") for r in missed]
+    stops = [f"{_case_label(r)}: {r.got}, {_rules(r.verdict)}" for r in over]
+    if brief:
+        through = f", and lets {len(routine) - len(over)} of {len(routine)} routine ones through" if routine else ""
+        return ([f"Would miss    {len(missed)} of {len(stop)} known calls it should stop{through}"
+                 f" ({summary.source.name}: each checked, none run)"]
+                + [f"  {m}" for m in misses] + [f"  stops, but shouldn't: {s}" for s in stops])
+    lines = [f"Known cases: {summary.source.name}, {len(summary.results)} calls checked one by one (none is run)"]
+    if stop:
+        lines.append(f"  Stops {len(stop) - len(missed)} of {len(stop)} calls it should stop." + (f" Misses {len(missed)}:" if missed else ""))
+        lines += [f"    {m}" for m in misses]
+    if routine:
+        lines.append(f"  Lets {len(routine) - len(over)} of {len(routine)} routine calls through."
+                     + (f" Stops {len(over)} it shouldn't:" if over else ""))
+        lines += [f"    {s}" for s in stops]
+    return lines

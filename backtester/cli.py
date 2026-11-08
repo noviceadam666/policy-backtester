@@ -1,4 +1,4 @@
-"""``hermes backtest ingest | run | diff | suggest | check | shadow | enforce | off | log | status | demo``."""
+"""``hermes backtest try | ingest | run | diff | suggest | check | shadow | enforce | off | log | status | demo``."""
 
 from __future__ import annotations
 
@@ -12,17 +12,20 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from .engine import diff_results, run_backtest
+from .engine import BacktestResult, diff_results, run_backtest
+from .guard import with_guard
 from .index import open_index
 from .ingest import IngestSummary, ingest, scheduled_jobs
 from .live import MODES, check_promoted, decisions, install_policy, promotions, record_promotion
-from .paths import default_index, default_root
-from .policy import PolicyError, load_policy
-from .report import (cant_vouch_lines, cant_vouch_names, describe_call, diff_to_json, render_diff, render_suggestion,
-                     render_table, suggestion_to_json, to_json)
+from .paths import DEFAULT_PROFILE, default_index, default_root
+from .policy import Policy, PolicyError, load_policy
+from .report import (cant_vouch_lines, cant_vouch_names, describe_call, diff_to_json, render_brief, render_diff,
+                     render_suggestion, render_table, suggestion_to_json, to_json)
 
 _RELATIVE_TIME = re.compile(r"^(\d+)([dh])$")
 BUNDLED = Path(__file__).resolve().parent.parent / "policies"
+# Stricter starting points, not presets: backtest and shadow them on your own history before you trust one.
+EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 # Under fixtures/, where Hermes's install scan reads the commands they quote as test data.
 BUNDLED_CASES = Path(__file__).resolve().parent.parent / "fixtures" / "cases"
 # Exit codes for --fail-on-break, so a policy change can fail CI: a job the policy would break, and,
@@ -36,12 +39,21 @@ def setup_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--index", type=Path, help="index file (default: <root>/backtest/index.db)")
     sub = parser.add_subparsers(dest="backtest_command", required=True)
 
-    ingest_parser = sub.add_parser("ingest", help="Update the index from each profile's state.db (read-only)")
-    ingest_parser.add_argument("--profile", action="append", help="only this profile (repeatable; default: all)")
+    trial = sub.add_parser("try", help="Check a guardrail against this profile's real work: what it would break, catch and miss; then shadow it")
+    trial.add_argument("policy", type=Path, help="policy file, or a bundled one by name (refined)")
+    trial.add_argument("--since", default="30d", help="how far back to look: 30d, 12h or YYYY-MM-DD (default: 30d)")
+    trial.add_argument("--cases", type=Path, help="known calls it should stop or allow (default: the bundled ones for a bundled policy)")
+    trial.add_argument("--no-shadow", action="store_true", help="report only; don't start shadow")
+    trial.add_argument("--no-redact", action="store_true", help="show raw commands")
+    trial.add_argument("--no-ingest", action="store_true", help=argparse.SUPPRESS)
+
+    ingest_parser = sub.add_parser("ingest", help="Update the index from this profile's state.db (read-only)")
+    _add_scope_options(ingest_parser)
 
     run = sub.add_parser("run", help="Replay a policy over history: hits and would-break")
     run.add_argument("policy", type=Path)
     _add_replay_options(run)
+    run.add_argument("--cases", type=Path, help="also check known calls it should stop or allow (default: the bundled ones for a bundled policy)")
     run.add_argument("--aggregate", action="store_true",
                      help="counts, tool names and rule hits only, for fleet views: hides job names, commands and titles")
 
@@ -87,8 +99,13 @@ def setup_parser(parser: argparse.ArgumentParser) -> None:
     demo.add_argument("--keep", type=Path, help="keep the synthetic fleet in this folder instead of a temp one")
 
 
+def _add_scope_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--profile", action="append", help="only this profile (repeatable; default: the one you're in)")
+    parser.add_argument("--all-profiles", action="store_true", help="read every profile under the Hermes root")
+
+
 def _add_replay_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--profile", action="append", help="only this profile (repeatable; default: all)")
+    _add_scope_options(parser)
     parser.add_argument("--since", default="30d", help="window start: 30d, 12h or YYYY-MM-DD (default: 30d)")
     parser.add_argument("--until", help="window end: 12h or YYYY-MM-DD (default: now)")
     parser.add_argument("--format", choices=("table", "json"), default="table")
@@ -103,17 +120,45 @@ def dispatch(args: argparse.Namespace, live=None) -> int:
     root = (args.hermes_root or default_root()).expanduser()
     index_path = (args.index or default_index(root)).expanduser()
     try:
+        _scope(args, live)
         if args.backtest_command == "status":
             return _cmd_status(args, root, index_path, live)
         if args.backtest_command in _LIVE_COMMANDS:
             if live is None:
-                print("backtest: shadow, enforce, off and log run inside Hermes: hermes -p <profile> backtest ...", file=sys.stderr)
+                print("backtest: try, shadow, enforce, off and log run inside Hermes: hermes -p <profile> backtest ...", file=sys.stderr)
                 return 1
             return _LIVE_COMMANDS[args.backtest_command](args, root, index_path, live)
         return _COMMANDS[args.backtest_command](args, root, index_path)
     except (PolicyError, sqlite3.Error, ValueError, OSError) as exc:
         print(f"backtest: {exc}", file=sys.stderr)
         return 1
+
+
+def _scope(args: argparse.Namespace, live) -> None:
+    """History commands read the profile they run in, unless given --profile or --all-profiles.
+
+    Outside Hermes there's no profile to be in, so they read every one, as they did before 0.5.
+    """
+    args.scope_note = None
+    if not hasattr(args, "all_profiles"):
+        return
+    if args.all_profiles and args.profile:
+        raise ValueError("--profile and --all-profiles don't go together")
+    if args.all_profiles:
+        args.profile = None
+    elif args.profile is None and live is not None:
+        here = live.profile() or DEFAULT_PROFILE
+        args.profile = [here]
+        args.scope_note = f"{here} only, the profile you're in; --all-profiles reads every profile"
+
+
+def _load(path: Path, root: Path) -> Policy:
+    """A policy file plus the built-in guard rules, which the live hook adds to every policy."""
+    return with_guard(load_policy(policy_path(path)), root)
+
+
+def _hermes(profile: str) -> str:
+    return "hermes" if profile == DEFAULT_PROFILE else f"hermes -p {profile}"
 
 
 def _cmd_ingest(args: argparse.Namespace, root: Path, index_path: Path) -> int:
@@ -148,26 +193,53 @@ def policy_path(path: Path, kind: str = "policy") -> Path:
 
     After ``hermes plugins install`` the shipped policies live in the plugin's folder, so
     ``run policies/naive.yaml`` works from anywhere. A file of the same name where you are wins.
-    Cases files are bundled in ``fixtures/cases``, and ``cases/refined.yaml`` finds one.
+    Cases files are bundled in ``fixtures/cases``, and ``cases/refined.yaml`` finds one. The stricter
+    examples are found the same way, as ``examples/hardened.yaml`` or just ``hardened``.
     """
     path = path.expanduser()
     if path.exists() or path.is_absolute():
         return path
-    folder = BUNDLED_CASES if kind == "cases" else BUNDLED
+    folders = [BUNDLED_CASES] if kind == "cases" else [BUNDLED, EXAMPLES]
     parts = path.parts
-    for prefix in ("policies", "fixtures", "cases"):
+    for prefix in ("policies", "fixtures", "cases", "examples"):
         if parts[:1] == (prefix,) and len(parts) > 1:
             parts = parts[1:]
-    bundled = folder / Path(*parts)
-    if bundled.is_file():
-        print(f"backtest: no {path} here, so using the bundled {bundled}", file=sys.stderr)
-        return bundled
-    names = ", ".join(sorted(f.name for f in folder.glob("*.yaml")))
-    raise PolicyError(f"can't read {kind} {path}: no such file here, and the bundled {'policies' if kind == 'policy' else 'cases files'} are {names}")
+    name = Path(*parts)
+    for candidate in (name, name.with_suffix(".yaml")) if not name.suffix else (name,):
+        for folder in folders:
+            bundled = folder / candidate
+            if bundled.is_file():
+                print(f"backtest: no {path} here, so using the bundled {bundled}", file=sys.stderr)
+                return bundled
+    names = ", ".join(sorted(f.name for f in folders[0].glob("*.yaml")))
+    if kind == "cases":
+        raise PolicyError(f"can't read cases {path}: no such file here, and the bundled cases files are {names}")
+    examples = ", ".join(sorted(f.name for f in EXAMPLES.glob("*.yaml")))
+    raise PolicyError(f"can't read policy {path}: no such file here, the bundled policies are {names},"
+                      f" and the examples are {examples}")
+
+
+def _paired_cases(args: argparse.Namespace, policy_file: Path) -> Path | None:
+    """The cases a report checks: --cases, else the bundled cases file named like a bundled policy. The
+    examples build on refined, so they get its cases."""
+    if getattr(args, "cases", None) is not None:
+        return policy_path(args.cases, "cases")
+    paired = BUNDLED_CASES / ("refined.yaml" if policy_file.parent == EXAMPLES else policy_file.name)
+    return paired if policy_file.parent in (BUNDLED, EXAMPLES) and paired.is_file() else None
+
+
+def _case_summary(policy: Policy, cases_file: Path | None):
+    from .check import load_cases, summarize_cases
+
+    return summarize_cases(policy, cases_file, load_cases(cases_file)) if cases_file else None
 
 
 def _cmd_run(args: argparse.Namespace, root: Path, index_path: Path) -> int:
-    policy = load_policy(policy_path(args.policy))
+    from .check import render_case_summary
+
+    source = policy_path(args.policy)
+    policy = with_guard(load_policy(source), root)
+    cases = _case_summary(policy, _paired_cases(args, source))
     _refresh(args, root, index_path)
     index = open_index(index_path)
     try:
@@ -177,9 +249,14 @@ def _cmd_run(args: argparse.Namespace, root: Path, index_path: Path) -> int:
         index.close()
     redacted = not args.no_redact
     if args.format == "json":
-        print(json.dumps(to_json(result, redacted, args.aggregate), indent=2))
+        report = to_json(result, redacted, args.aggregate)
+        if cases is not None:
+            report["known_cases"] = cases.to_json()
+        print(json.dumps(report, indent=2))
     else:
-        print(render_table(result, redacted, args.aggregate))
+        print(render_table(result, redacted, args.aggregate, args.scope_note))
+        if cases is not None:
+            print("\n" + "\n".join(render_case_summary(cases)))
     return _exit_code(args, bool(result.would_break), result)
 
 
@@ -190,7 +267,7 @@ def _exit_code(args: argparse.Namespace, breaks: bool, result) -> int:
 
 
 def _cmd_diff(args: argparse.Namespace, root: Path, index_path: Path) -> int:
-    before, after = load_policy(policy_path(args.before)), load_policy(policy_path(args.after))
+    before, after = _load(args.before, root), _load(args.after, root)
     _refresh(args, root, index_path)
     since, until = _parse_time(args.since), _parse_time(args.until)
     scheduled = scheduled_jobs(root, args.profile)
@@ -214,7 +291,7 @@ def _cmd_suggest(args: argparse.Namespace, root: Path, index_path: Path) -> int:
     from .suggest import load_proposal, proposed_yaml, suggest
 
     args.policy = policy_path(args.policy)
-    policy = load_policy(args.policy)
+    policy = with_guard(load_policy(args.policy), root)
     if args.out is not None and args.out.exists():
         raise ValueError(f"{args.out} already exists, and suggest never overwrites a file")
     _refresh(args, root, index_path)
@@ -231,7 +308,8 @@ def _cmd_suggest(args: argparse.Namespace, root: Path, index_path: Path) -> int:
                 f"Proposed by hermes backtest suggest from {args.policy.name} (sha256 {policy.hash[:12]}) on {datetime.now():%Y-%m-%d}.",
                 "Each unless_command added exempts only the exact command a job ran. Review it, then shadow it.",
             ])
-            after = run_backtest(index, load_proposal(text, str(args.out or "proposed")), since, until, args.profile, scheduled)
+            after = run_backtest(index, with_guard(load_proposal(text, str(args.out or "proposed")), root), since, until,
+                                 args.profile, scheduled)
     finally:
         index.close()
     redacted = not args.no_redact
@@ -260,7 +338,7 @@ def _cmd_suggest(args: argparse.Namespace, root: Path, index_path: Path) -> int:
 def _cmd_check(args: argparse.Namespace, root: Path, index_path: Path) -> int:
     from .check import check_call, check_cases, load_cases, make_call, render_call, render_cases
 
-    policy = load_policy(policy_path(args.policy))
+    policy = _load(args.policy, root)
     if args.cases is not None:
         if args.call_command or args.workdir or args.call_args:
             raise ValueError("check takes either --cases or one call, not both")
@@ -279,42 +357,31 @@ def _cmd_check(args: argparse.Namespace, root: Path, index_path: Path) -> int:
     return 0
 
 
-def _cmd_promote(args: argparse.Namespace, root: Path, index_path: Path, live) -> int:
-    stage, home, profile = args.backtest_command, Path(live.home()), live.profile()
-    source = policy_path(args.policy) if args.policy else (Path(live.get("policy", None)) if live.get("policy", None) else None)
-    if source is None:
-        print("backtest: no policy given, and none is in shadow on this profile", file=sys.stderr)
-        return 1
-    policy = load_policy(source)
+def _backtest_here(args: argparse.Namespace, root: Path, index_path: Path, live, policy: Policy) -> BacktestResult:
+    profile = live.profile()
     _refresh(args, root, index_path, [profile])
-    since = _parse_time(args.since)
     index = open_index(index_path)
     try:
-        result = run_backtest(index, policy, since, None, [profile], scheduled_jobs(root, [profile]))
+        return run_backtest(index, policy, _parse_time(args.since), None, [profile], scheduled_jobs(root, [profile]))
     finally:
         index.close()
+
+
+def _problems(result: BacktestResult) -> tuple[list[str], list[str], list[str]]:
+    """The jobs a policy would break, the jobs it can't vouch for, and the two as enforce's reasons to refuse."""
     broken = [j.job_name or j.job_id for j in result.would_break]
     unvouched = cant_vouch_names(result)
-    print(f"Backtest on {profile}, {args.since}: {result.calls_replayed} calls, {len(result.incidents)} session(s) caught,"
-          f" {len(broken)} job(s) would break" + (f" ({', '.join(broken)})" if broken else ""))
-    if not result.calls_replayed:
-        print(f"Warning: {profile} has no tool calls in this window, so this backtest checked nothing. A clean result here"
-              " says nothing about the policy yet.")
-    if unvouched:
-        print(f"Can't vouch for {len(unvouched)} scheduled job(s) on {profile}: {', '.join(unvouched)}. None has completed a run"
-              " in this window, so the backtest never saw them work.")
     problems = [f"it would break {len(broken)} job(s)"] if broken else []
     if unvouched:
         problems.append(f"it can't vouch for {len(unvouched)} scheduled job(s) that haven't completed a run in this window")
-    if stage == "enforce" and not any(p.get("stage") == "shadow" and p.get("policy") == policy.hash for p in promotions(home)):
-        problems.append("it hasn't run in shadow on this profile")
-    if problems and stage == "enforce" and not args.force:
-        advice = " Keep it in shadow until each job has completed a run, then enforce again." if unvouched else ""
-        print(f"Not enforcing: {' and '.join(problems)}.{advice} Pass --force to enforce anyway (recorded).")
-        return 1
-    if (broken or unvouched) and stage == "shadow":
-        until = "it breaks no jobs" + (" and each scheduled job has completed a run" if unvouched else "")
-        print(f"Shadow changes nothing, so it starts anyway; enforce will refuse this policy until {until}.")
+    return broken, unvouched, problems
+
+
+def _start(stage: str, source: Path, policy: Policy, result: BacktestResult, args: argparse.Namespace, live,
+           forced: bool, via: str | None = None) -> str:
+    """Install the policy in this profile, switch the mode and record the promotion. Returns its name."""
+    home, profile = Path(live.home()), live.profile()
+    broken, unvouched, _ = _problems(result)
     already = source.parent == home / "backtest" / "policies"
     installed = source if already else install_policy(home, source, policy)
     # Promoting the installed copy keeps the name the policy was first promoted under.
@@ -324,12 +391,96 @@ def _cmd_promote(args: argparse.Namespace, root: Path, index_path: Path, live) -
     live.set("policy_sha256", policy.hash)
     live.set("mode", stage)
     record_promotion(home, {
-        "stage": stage, "policy": policy.hash, "source": name, "profile": profile, "forced": bool(problems),
-        "window_since": since, "calls": result.calls_replayed, "caught": len(result.incidents), "would_break": broken,
-        "cant_vouch": unvouched,
+        "stage": stage, "policy": policy.hash, "source": name, "profile": profile, "forced": forced,
+        "window_since": _parse_time(args.since), "calls": result.calls_replayed, "caught": len(result.incidents),
+        "would_break": broken, "cant_vouch": unvouched, **({"via": via} if via else {}),
     })
+    return name
+
+
+def _cmd_promote(args: argparse.Namespace, root: Path, index_path: Path, live) -> int:
+    stage, home, profile = args.backtest_command, Path(live.home()), live.profile()
+    source = policy_path(args.policy) if args.policy else (Path(live.get("policy", None)) if live.get("policy", None) else None)
+    if source is None:
+        print("backtest: no policy given, and none is in shadow on this profile", file=sys.stderr)
+        return 1
+    policy = load_policy(source)
+    result = _backtest_here(args, root, index_path, live, with_guard(policy, root))
+    broken, unvouched, problems = _problems(result)
+    print(f"Backtest on {profile}, {args.since}: {result.calls_replayed} calls, {len(result.incidents)} session(s) caught,"
+          f" {len(broken)} job(s) would break" + (f" ({', '.join(broken)})" if broken else ""))
+    if not result.calls_replayed:
+        print(f"Warning: {profile} has no tool calls in this window, so this backtest checked nothing. A clean result here"
+              " says nothing about the policy yet.")
+    if unvouched:
+        print(f"Can't vouch for {len(unvouched)} scheduled job(s) on {profile}: {', '.join(unvouched)}. None has completed a run"
+              " in this window, so the backtest never saw them work.")
+    if stage == "enforce" and not any(p.get("stage") == "shadow" and p.get("policy") == policy.hash for p in promotions(home)):
+        problems.append("it hasn't run in shadow on this profile")
+    if problems and stage == "enforce" and not args.force:
+        advice = " Keep it in shadow until each job has completed a run, then enforce again." if unvouched else ""
+        print(f"Not enforcing: {' and '.join(problems)}.{advice} Pass --force to enforce anyway (recorded).")
+        return 1
+    if (broken or unvouched) and stage == "shadow":
+        until = "it breaks no jobs" + (" and each scheduled job has completed a run" if unvouched else "")
+        print(f"Shadow changes nothing, so it starts anyway; enforce will refuse this policy until {until}.")
+    name = _start(stage, source, policy, result, args, live, bool(problems))
     print(f"{stage.capitalize()} is on for {profile}: {name} (sha256 {policy.hash[:12]}), from the next tool call.")
     return 0
+
+
+def _cmd_try(args: argparse.Namespace, root: Path, index_path: Path, live) -> int:
+    """The everyday path: one guardrail, this profile's real work, a plain answer, then shadow."""
+    from .check import render_case_summary
+
+    profile, cmd = live.profile(), _hermes(live.profile())
+    source = policy_path(args.policy)
+    policy = load_policy(source)
+    guarded = with_guard(policy, root)
+    cases = _case_summary(guarded, _paired_cases(args, source))
+    result = _backtest_here(args, root, index_path, live, guarded)
+    broken, unvouched, problems = _problems(result)
+    print(f"Trying {source.name} (sha256 {policy.hash[:12]}) on {profile}, {_window(args.since)}:"
+          f" {result.calls_replayed} tool calls in {result.sessions_replayed} sessions")
+    print()
+    print("\n".join(render_brief(result, not args.no_redact)))
+    if cases is not None:
+        print("\n".join(render_case_summary(cases, brief=True)))
+    else:
+        print(f"Would miss    not checked: pass --cases FILE, calls it should stop (see {cmd} backtest check --help)")
+    print()
+    mode, current = live.get("mode", "off"), live.get("policy_sha256", None)
+    shadowing = False
+    if args.no_shadow:
+        print(f"Nothing started (--no-shadow). To watch it on live calls: {cmd} backtest shadow {args.policy}")
+    elif mode == "enforce":
+        print(f"Enforce is already on for {profile} (sha256 {(current or '?')[:12]}), so try leaves it alone."
+              f" To watch this policy instead: {cmd} backtest shadow {args.policy}")
+    elif mode == "shadow" and current == policy.hash:
+        shadowing = True
+        print(f"Already in shadow on {profile}: it logs what {source.name} would do and changes nothing.")
+    else:
+        if mode == "shadow":
+            print(f"Replacing the policy in shadow on {profile} (sha256 {(current or '?')[:12]}).")
+        _start("shadow", source, policy, result, args, live, bool(problems), via="try")
+        shadowing = True
+        print(f"Shadow is on for {profile}: from the next tool call it logs what {source.name} would do, and changes nothing.")
+    steps = [(f"suggest {args.policy} --out fixed.yaml", "propose exemptions for the jobs it breaks")] if broken else []
+    if shadowing:
+        steps += [("log", "what shadow would have stopped, and whether each job ran untouched"),
+                  ("enforce", "once log shows every job running untouched; it checks again first")]
+    steps.append((f"run {args.policy}", "the full report"))
+    width = max(len(step) for step, _ in steps)
+    print("Next")
+    for step, why in steps:
+        print(f"  {cmd} backtest {step:{width}s}  {why}")
+    return 0
+
+
+def _window(since: str) -> str:
+    if since == "all":
+        return "all history"
+    return f"last {since}" if _RELATIVE_TIME.match(since) else f"since {since}"
 
 
 def _cmd_off(args: argparse.Namespace, root: Path, index_path: Path, live) -> int:
@@ -377,6 +528,8 @@ def _cmd_log(args: argparse.Namespace, root: Path, index_path: Path, live) -> in
         for job_id, name in sorted(never_ran.items(), key=lambda kv: kv[1] or kv[0]):
             stops = stops_by_job.get(job_id, 0)
             print(f"  {name or job_id}: no completed run since {_when(since)}" + (f", {stops} stop(s)" if stops else ""))
+    if mode == "shadow":
+        print(_readiness(profile, jobs, never_ran, stops_by_job, checked))
     redacted = not args.no_redact
     print("Decisions")
     if not rows:
@@ -391,6 +544,24 @@ def _cmd_log(args: argparse.Namespace, root: Path, index_path: Path, live) -> in
         call = SimpleNamespace(args=d.get("args") or {})
         print(f"  {_when(d.get('ts'))}  {where}  {verb}  {rules}  {d.get('tool')}: {describe_call(call, redacted)}")
     return 0
+
+
+def _readiness(profile: str, jobs: dict, never_ran: dict, stops_by_job: dict[str, int], checked: int) -> str:
+    """What the shadow log says about enforcing: a job it would stop, a job it hasn't seen, or neither."""
+    names = {**{job_id: name for job_id, (name, _) in jobs.items()}, **never_ran}
+    stopped = sorted(names.get(j) or j for j, n in stops_by_job.items() if n and j in names)
+    unseen = sorted(name or job_id for job_id, name in never_ran.items())
+    cmd = _hermes(profile)
+    if stopped:
+        return (f"Not ready: shadow would have stopped {', '.join(stopped)}. Fix the policy first"
+                f" ({cmd} backtest suggest POLICY proposes exemptions).")
+    if unseen:
+        return f"Not seen yet: {', '.join(unseen)} hasn't completed a run since shadow started. Wait for it before you enforce."
+    if not checked:
+        return "Nothing to review yet: no tool calls since shadow started. Use the profile, then look again."
+    if not jobs:
+        return f"No scheduled jobs here. Review the decisions below, then: {cmd} backtest enforce"
+    return f"Ready: every scheduled job ran untouched in shadow. Next: {cmd} backtest enforce (it checks the backtest again first)"
 
 
 def _cron_job(task_id: str | None) -> str | None:
@@ -424,6 +595,7 @@ def _cmd_status(args: argparse.Namespace, root: Path, index_path: Path, live=Non
     if live is not None:
         mode, sha = live.get("mode", "off"), live.get("policy_sha256", None)
         print(f"Live on {live.profile()}: {mode}" + (f", policy sha256 {sha[:12]}" if sha and mode in MODES[1:] else ""))
+        _print_drift(live, mode, sha)
         if mode in MODES[1:]:
             _print_live_problem(live, mode)
     if not index_path.exists():
@@ -448,6 +620,19 @@ def _cmd_status(args: argparse.Namespace, root: Path, index_path: Path, live=Non
         print(f"{r['profile']:26s} {r['sessions']:8d} {r['calls']:7d}  {_day(r['oldest']):16s}  {_day(r['newest']):16s}")
     print(f"Index: {index_path}")
     return 0
+
+
+def _print_drift(live, mode: str, sha: str | None) -> None:
+    """Say when the settings don't match the last promotion: someone set them without shadow, enforce or off."""
+    last = next((p for p in reversed(promotions(Path(live.home()))) if p.get("stage") in MODES), None)
+    if last is None:
+        if mode != "off":
+            print(f"  But no promotion is on record: {mode} was set outside hermes backtest, with no backtest behind it.")
+        return
+    if mode == last["stage"] and (mode == "off" or sha == last.get("policy")):
+        return
+    was = last["stage"] + (f" with sha256 {last['policy'][:12]}" if last["stage"] != "off" and last.get("policy") else "")
+    print(f"  But the last promotion ({_when(last.get('ts'))}) set {was}: the settings were changed outside hermes backtest.")
 
 
 def _print_live_problem(live, mode: str) -> None:
@@ -499,4 +684,4 @@ def _parse_time(value: str | None) -> float | None:
 
 _COMMANDS = {"ingest": _cmd_ingest, "run": _cmd_run, "diff": _cmd_diff, "suggest": _cmd_suggest, "check": _cmd_check,
              "status": _cmd_status, "demo": _cmd_demo}
-_LIVE_COMMANDS = {"shadow": _cmd_promote, "enforce": _cmd_promote, "off": _cmd_off, "log": _cmd_log}
+_LIVE_COMMANDS = {"try": _cmd_try, "shadow": _cmd_promote, "enforce": _cmd_promote, "off": _cmd_off, "log": _cmd_log}

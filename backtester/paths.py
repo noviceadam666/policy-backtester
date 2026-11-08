@@ -27,9 +27,14 @@ def default_root() -> Path:
         home = os.environ.get("HERMES_HOME")
         if not home:
             return Path.home() / ".hermes"
-        path = Path(home).expanduser()
-        return path.parent.parent if path.parent.name == "profiles" else path
+        return root_of(Path(home).expanduser())
     return Path(get_default_hermes_root())
+
+
+def root_of(home: Path) -> Path:
+    """The Hermes root a profile's home sits in: the home itself for the default profile."""
+    home = Path(home)
+    return home.parent.parent if home.parent.name == "profiles" else home
 
 
 def default_index(root: Path) -> Path:

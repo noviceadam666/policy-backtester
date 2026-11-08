@@ -1,7 +1,7 @@
 # Calls refined.yaml should get right, for CI: hermes backtest check refined.yaml --cases cases/refined.yaml
 # exits 3 if any case gets a different action. Synthetic commands; none of them is ever run.
 # A case marked known_miss is a gap refined.yaml is known to have: it's reported but doesn't fail the run.
-# Most of those are bypass attempts from a zero-knowledge user test; policies/hardened.yaml proposes fixes.
+# Most of those are bypass attempts from a zero-knowledge user test; examples/hardened.yaml proposes fixes.
 
 # What it's for: the demo's incidents and jobs.
 - name: delete outside the cache

@@ -198,7 +198,7 @@ def test_fail_on_break_exit_codes(fleet, ops, live):
 def test_demo_tells_the_whole_story(capsys, tmp_path):
     assert run_demo(tmp_path / "demo") == 0
     out = capsys.readouterr().out
-    assert "11 of 11 checks passed" in out
+    assert "12 of 12 checks passed" in out
     assert "synthetic" in out.lower()
     assert f"kept in {tmp_path / 'demo'}" in out
 

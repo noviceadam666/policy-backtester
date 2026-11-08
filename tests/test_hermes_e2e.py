@@ -72,13 +72,19 @@ def test_the_story_through_the_real_plugin_manager(plugin_home, fleet):
     state = hashlib.sha256(profile.db_path.read_bytes()).hexdigest()
     naive, refined = REPO / "policies" / "naive.yaml", REPO / "policies" / "refined.yaml"
 
-    run = backtest(plugin_home, "--hermes-root", str(fleet.root), "run", str(naive))
+    here = backtest(plugin_home, "--hermes-root", str(fleet.root), "run", str(naive))
+    assert here.returncode == 0, here.stderr
+    assert "Replayed 0 calls" in here.stdout
+    assert "Scope    default only, the profile you're in; --all-profiles reads every profile" in here.stdout
+
+    run = backtest(plugin_home, "--hermes-root", str(fleet.root), "run", str(naive), "--all-profiles")
     assert run.returncode == 0, run.stderr
     assert "Caught: 3 session(s)" in run.stdout
     assert "Would break: 2 job(s)" in run.stdout
     assert "nightly-cleanup (cron, demo): blocked in 2 of 2 completed runs" in run.stdout
 
-    diff = backtest(plugin_home, "--hermes-root", str(fleet.root), "diff", str(naive), str(refined), "--format", "json")
+    diff = backtest(plugin_home, "--hermes-root", str(fleet.root), "diff", str(naive), str(refined), "--format", "json",
+                    "--profile", "demo")
     assert diff.returncode == 0, diff.stderr
     report = json.loads(diff.stdout)
     assert (report["after"]["caught"], report["after"]["would_break"]) == (3, 0)
@@ -86,10 +92,12 @@ def test_the_story_through_the_real_plugin_manager(plugin_home, fleet):
     assert len(report["no_longer_matched"]) == 4
 
     proposed = fleet.root / "proposed.yaml"
-    suggest = backtest(plugin_home, "--hermes-root", str(fleet.root), "suggest", str(naive), "--out", str(proposed))
+    suggest = backtest(plugin_home, "--hermes-root", str(fleet.root), "suggest", str(naive), "--out", str(proposed),
+                       "--all-profiles")
     assert suggest.returncode == 0, suggest.stderr
     assert "Left for a human: none" in suggest.stdout
-    rerun = backtest(plugin_home, "--hermes-root", str(fleet.root), "run", str(proposed), "--fail-on-break")
+    rerun = backtest(plugin_home, "--hermes-root", str(fleet.root), "run", str(proposed), "--fail-on-break",
+                     "--all-profiles")
     assert rerun.returncode == 0, rerun.stderr
     assert "Caught: 3 session(s)" in rerun.stdout and "Would break: 0 job(s)" in rerun.stdout
 
@@ -244,3 +252,13 @@ def test_hermes_plugins_validate_passes():
     done = subprocess.run(["hermes", "plugins", "validate", str(REPO)], capture_output=True, text=True, timeout=180)
     assert done.returncode == 0, done.stdout + done.stderr
     assert "Validation passed" in done.stdout
+
+
+@needs_hermes
+def test_the_guard_rules_through_hermess_own_hook_dispatch(plugin_home):
+    settings_config(plugin_home, "enforce", REPO / "policies" / "refined.yaml")
+    switch_off, edit, read_log = dispatch_through_hermes(
+        plugin_home, "hermes backtest off", f"sed -i s/enforce/off/ {plugin_home}/config.yaml", "hermes backtest log")
+    assert switch_off.endswith("[policy-backtester: guard-commands]")
+    assert edit.endswith("[policy-backtester: guard-files]")
+    assert read_log is None

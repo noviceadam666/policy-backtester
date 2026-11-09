@@ -23,7 +23,9 @@ IDS = frozenset({COMMANDS_ID, FILES_ID})
 _SEG = r"[^;&|\n()`]*"
 _COMMANDS = "|".join([
     # The subcommand is the first word after backtest's own options: ``backtest --hermes-root /x off``.
-    r"\bbacktest(?:\s+--?[\w-]+(?:=\S+|\s+[^\s-]\S*)?)*\s+(?:off|shadow|enforce)(?![\w./-])",
+    # Each option, ``--`` included, reads only one way, so a long run of options that doesn't match fails in
+    # linear time: Python can't interrupt a regex, and Hermes blocks a hook that runs past 30 seconds.
+    r"\bbacktest(?:\s+(?:--|-{1,2}\w[\w-]*(?:=\S+|\s+[^\s-]\S*)?))*\s+(?:off|shadow|enforce)(?![\w./-])",
     rf"\bplugins\s+(?:disable|uninstall|remove|rm)\b{_SEG}\bpolicy-backtester\b",
     rf"\bconfig\s+set\s+{_SEG}\bplugins\b",
 ])

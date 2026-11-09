@@ -1,5 +1,5 @@
 name: policy-backtester
-version: 0.5.0
+version: 0.5.1
 description: "A test harness for Hermes guardrails: what a rule would break, and what it would miss, on your agents' real work. Then shadow and enforce it."
 author: Novice Adam
 requires_hermes: ">=0.22.5"

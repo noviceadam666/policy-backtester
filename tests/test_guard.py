@@ -2,6 +2,8 @@
 
 import argparse
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -36,6 +38,8 @@ def decide(command, workdir=None, tool="terminal"):
     "hermes -p ops backtest off",
     "hermes backtest shadow mine.yaml",
     "hermes backtest --hermes-root /x enforce --force",
+    "hermes backtest --index=/tmp/x.db -v shadow mine.yaml",
+    "hermes backtest -- off",
     "cd /tmp && hermes -p ops backtest off",
     "hermes plugins disable policy-backtester",
     "hermes -p ops plugins uninstall policy-backtester",
@@ -50,12 +54,39 @@ def test_the_agent_cant_run_the_guards_own_switches(command):
     "hermes -p ops backtest log",
     "hermes backtest status",
     "hermes backtest run shadow.yaml --since 7d",
+    "hermes backtest --since 7d log",
     "hermes backtest log; echo off",
     "hermes plugins list",
     "hermes config set model.default some-model",
 ])
 def test_reading_the_guard_is_fine(command):
     assert decide(command).action is None
+
+
+def test_a_long_run_of_options_is_decided_quickly():
+    """Python can't interrupt a regex, and Hermes blocks a hook that runs past 30 seconds.
+
+    In a child process, so a pattern that backtracks fails here instead of hanging the suite.
+    """
+    script = """
+import json, time
+from pathlib import Path
+from backtester.evaluator import evaluate
+from backtester.guard import with_guard
+from backtester.policy import load_policy
+policy = with_guard(load_policy(Path("policies/refined.yaml")), Path.home() / ".hermes")
+out = []
+for options, tail in ((" --x", "status"), (" --", "status"), (" --since 7d", "off")):
+    start = time.perf_counter()
+    action = evaluate(policy, "terminal", {"command": "hermes backtest" + options * 2000 + " " + tail}, "ops").action
+    out.append([action, time.perf_counter() - start])
+print(json.dumps(out))
+"""
+    done = subprocess.run([sys.executable, "-c", script], cwd=REPO, capture_output=True, text=True, timeout=10)
+    assert done.returncode == 0, done.stderr
+    decided = json.loads(done.stdout)
+    assert [action for action, _ in decided] == [None, None, "block"]
+    assert max(took for _, took in decided) < 0.1
 
 
 @pytest.mark.parametrize("tool,target,workdir", [

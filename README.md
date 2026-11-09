@@ -206,8 +206,9 @@ It's one `pre_tool_call` callback that reads the mode from this plugin's setting
 applies from the next tool call without a restart.
 
 - **shadow** evaluates the call, appends any rule hit to `<profile>/backtest/decisions.jsonl`, and returns
-  nothing. Hermes treats a callback that raises or times out as a block, so shadow catches every error itself:
-  a bug here can't stop a job.
+  nothing. Hermes treats a callback that raises as a block, so shadow catches every error itself: a bug here
+  can't stop a job. A slow rule still can, because Hermes also blocks a callback that runs past 30 seconds (see
+  Limits).
 - **enforce** returns `block` with the rule's message, or `approve` to hand the call to Hermes's approval gate,
   which fails closed on denial or timeout. If the policy can't load, or its copy was edited after promotion, it
   blocks every call, as Hermes does for a policy hook that errors. Those blocks are logged with the reason, `log`
@@ -355,6 +356,9 @@ have stopped 2 Kanban tasks. Shadow it before you enforce it.
 - Regex and glob rules see what a command says, not what it does. `if_unresolved` makes a rule ask when it
   can't tell, but a parent directory still reads as a different path. Treat a clean backtest as evidence, not
   proof.
+- Shadow never blocks on its own decision, but Hermes blocks any hook that runs past 30 seconds, and Python can't
+  interrupt a regex once it starts. Keep your patterns free of nested repeats such as `(a+)+`, which can take
+  minutes on one long command. The built-in rules decide a command with 2,000 options in milliseconds.
 - Enforcement runs per profile: install and promote in each profile you guard. `--all-profiles` reads them all.
 - A backtest can't vouch for a job it never saw run; it names those jobs instead of counting them as safe.
 - Tested on Hermes v0.22.5, v0.22.7 and v0.23.0, including fresh v0.23.0 installs (`plugins install`, `enable`,

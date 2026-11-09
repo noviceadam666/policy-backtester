@@ -11,6 +11,7 @@ import argparse
 import contextlib
 import io
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -59,6 +60,10 @@ def _cli(root: Path, live: MemorySettings | None, *argv: str) -> tuple[int, str]
 
 
 def run_demo(keep: Path | None = None) -> int:
+    if keep is not None and Path(keep).exists() and (not Path(keep).is_dir() or any(Path(keep).iterdir())):
+        # The fleet is built from scratch, so a folder from an earlier --keep can't be reused.
+        print(f"backtest: --keep needs a new or empty folder, and {keep} isn't one", file=sys.stderr)
+        return 1
     root = Path(keep) if keep else Path(tempfile.mkdtemp(prefix="backtest-demo-"))
     try:
         return _story(root, kept=keep is not None)

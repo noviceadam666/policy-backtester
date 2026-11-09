@@ -21,7 +21,7 @@ rules:
     message: Secret files are off limits.
   - id: no-shell-uploads
     tool: terminal
-    command: '(curl|wget)\s(?:[^|;&]*\s)?(-d|--data|-F|--form|-T|--upload-file|--post-data|--post-file)'
+    command: '(curl|wget)\s(?:(?:(?!(?:curl|wget)\s)[^|;&\n]|\\\n)*\s)?(-d|--data|-F|--form|-T|--upload-file|--post-data|--post-file)'
     action: block
     message: Uploads from the shell are blocked.
   - id: ask-unresolved-reads

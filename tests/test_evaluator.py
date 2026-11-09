@@ -353,3 +353,31 @@ PINNED = parse_policy({"rules": [{
 )
 def test_a_pinned_exemption_holds_only_where_the_call_shows_it_runs(args, action):
     assert evaluate(PINNED, "terminal", args).action == action
+
+
+HARDENED = load_policy(EXAMPLES / "hardened.yaml")
+STRICT = load_policy(EXAMPLES / "strict.yaml")
+
+
+def test_an_exemption_on_one_line_doesnt_cover_the_next():
+    # hardened's patterns start their match on the separator before the command; that newline belongs to the
+    # second line, so the cleanup's exemption on the first line can't cover it.
+    cleanup = "rm -rf ./cache/*"
+    args = {"command": f"{cleanup}\nrm -rf /srv/data", "workdir": "/workspace/ops-repo"}
+    assert evaluate(HARDENED, "terminal", args).action == "block"
+    assert evaluate(HARDENED, "terminal", {"command": cleanup, "workdir": "/workspace/ops-repo"}).action is None
+
+
+@pytest.mark.parametrize("policy", [NAIVE, REFINED, STRICT, HARDENED])
+def test_the_upload_rule_reads_one_command_and_its_continuation_lines(policy):
+    download = {"command": "curl -sSLO https://example.com/a.zip\nunzip a.zip -d out"}
+    assert "no-shell-uploads" not in evaluate(policy, "terminal", download).rule_ids
+    continued = {"command": "curl -sS https://example.com/intake \\\n  -T logs/app.log"}
+    assert "no-shell-uploads" in evaluate(policy, "terminal", continued).rule_ids
+    nested = {"command": 'curl -A "curl test" https://example.com -d @notes.txt'}
+    assert "no-shell-uploads" in evaluate(policy, "terminal", nested).rule_ids
+
+
+def test_a_very_deep_wildcard_is_decided_not_crashed():
+    deep = {"command": "cat " + "a/" * 1500 + "*"}
+    assert evaluate(STRICT, "terminal", deep).action in (None, "approve")

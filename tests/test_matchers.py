@@ -1,8 +1,10 @@
 """Golden cases for path candidates and globs."""
 
+import random
+
 import pytest
 
-from backtester.matchers import compile_glob, path_candidates, segment_spans
+from backtester.matchers import compile_glob, path_candidates, segment_spans, span_at
 
 MENTIONS = [
     # The spec's open gap: uploads name the file inside an option value.
@@ -118,3 +120,23 @@ def test_could_reach_narrows_only_plain_wildcards():
     assert could_reach("*.yaml", ["config/vendor-api.yaml"], "/repo/config") is False
     assert could_reach("*.yaml", ["**/config/vendor-api.yaml"], "/repo/config")
     assert could_reach("$X", ["/etc/shadow"], None) and could_reach("../*", ["/etc/shadow"], None)
+
+
+def test_span_at_gives_a_match_on_a_separator_to_the_segment_after_it():
+    def scan(spans, offset):
+        inside = next((s for s in spans if s[0] <= offset < s[1]), None)
+        return inside or next((s for s in spans if s[0] > offset), spans[-1])
+
+    spans = segment_spans("a ; b\nc && d")
+    assert spans == [(0, 2), (3, 5), (6, 8), (10, 12)]
+    assert span_at(spans, 1) == (0, 2)                    # inside the first segment
+    assert span_at(spans, 2) == (3, 5)                    # the ";"
+    assert span_at(spans, 5) == (6, 8)                    # the newline
+    assert span_at(spans, 8) == span_at(spans, 9) == (10, 12)  # each "&" of "&&"
+
+    rng = random.Random(7)
+    for _ in range(300):
+        command = "".join(rng.choice(["ls ", "a", ";", "&&", "||", "|", "\n", "(", ")", "`", " x=1 "]) for _ in range(rng.randint(0, 40)))
+        spans = segment_spans(command)
+        for offset in range(len(command) + 2):
+            assert span_at(spans, offset) == scan(spans, offset)

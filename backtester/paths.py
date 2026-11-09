@@ -37,6 +37,16 @@ def root_of(home: Path) -> Path:
     return home.parent.parent if home.parent.name == "profiles" else home
 
 
+def shown(path: Path | str) -> str:
+    """A path as output prints it: ``~/...`` under this user's home, so a shared screen or a pasted report
+    doesn't carry the account name."""
+    path = Path(path)
+    try:
+        return "~/" + path.relative_to(Path.home()).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def default_index(root: Path) -> Path:
     return root / "backtest" / "index.db"
 

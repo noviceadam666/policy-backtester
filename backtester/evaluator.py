@@ -17,6 +17,7 @@ count, and the message names the word it couldn't resolve.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -29,6 +30,8 @@ def unresolved_note(word: str) -> str:
     return f"(It can't tell what {word} names until the shell expands it.)"
 
 _PATH_ARGS = ("path", "file_path", "filepath", "filename", "paths", "files")
+# The patch tool's V4A mode names its files only in the patch body, as Hermes's parser reads them.
+_PATCH_FILE = re.compile(r"^\*\*\*[^\S\n]*(?:Update|Add|Delete|Move)[^\S\n]+File:(.*)$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -192,4 +195,9 @@ def _arg_paths(args: dict) -> set[str]:
         for item in value if isinstance(value, list) else [value]:
             if isinstance(item, str) and item:
                 paths.add(normalize_path(item))
+    patch = args.get("patch")
+    if isinstance(patch, str):
+        for header in _PATCH_FILE.findall(patch):
+            # ``*** Move File: a -> b`` names both.
+            paths.update(normalize_path(p) for p in header.split("->", 1) if p.strip())
     return paths

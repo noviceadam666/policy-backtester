@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from backtester.cli import dispatch, setup_parser
+from backtester.cli import BREAKS_EXIT, dispatch, setup_parser
+from backtester.paths import shown
 from fakehermes import stage_story
 
 POLICIES = Path(__file__).resolve().parent.parent / "policies"
@@ -34,7 +35,13 @@ def test_ingest_then_status(staged, capsys):
 
 def test_ingest_of_an_unknown_profile_says_so(staged, capsys):
     assert run_cli(staged, "ingest", "--profile", "typo") == 1
-    assert "no matching profile" in capsys.readouterr().err
+    assert "no profile named typo" in capsys.readouterr().err
+
+
+def test_a_profile_typo_fails_instead_of_replaying_nothing(staged, capsys):
+    for command in (["run", "refined"], ["diff", "naive", "refined"], ["suggest", "naive"]):
+        assert run_cli(staged, *command, "--profile", "dmeo", "--fail-on-break") == 1
+        assert "no profile named dmeo" in capsys.readouterr().err
 
 
 def test_status_before_any_ingest(staged, capsys):
@@ -136,7 +143,7 @@ def test_bundled_policies_work_from_anywhere(staged, tmp_path, monkeypatch, caps
     assert run_cli(staged, "run", "policies/naive.yaml") == 0
     captured = capsys.readouterr()
     assert "Caught: 3 session(s)" in captured.out
-    assert "using the bundled" in captured.err and str(POLICIES / "naive.yaml") in captured.err
+    assert "using the bundled" in captured.err and shown(POLICIES / "naive.yaml") in captured.err
     assert run_cli(staged, "diff", "naive.yaml", "refined.yaml", "--no-ingest") == 0
     assert "jobs broken      2       0" in capsys.readouterr().out
     assert run_cli(staged, "run", "policies/nope.yaml", "--no-ingest") == 1
@@ -147,11 +154,15 @@ def test_bundled_policies_work_from_anywhere(staged, tmp_path, monkeypatch, caps
 def test_bundled_policies_and_examples_by_name(staged, tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert run_cli(staged, "run", "refined", "--no-ingest") == 0
-    assert str(POLICIES / "refined.yaml") in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert shown(POLICIES / "refined.yaml") in err
+    if POLICIES.is_relative_to(Path.home()):
+        # A shared screen or a pasted report shouldn't carry the account name.
+        assert str(Path.home()) not in err and "~/" in err
     examples = POLICIES.parent / "examples"
     for name in ("hardened", "examples/hardened.yaml", "policies/hardened.yaml"):
         assert run_cli(staged, "run", name, "--no-ingest") == 0
-        assert str(examples / "hardened.yaml") in capsys.readouterr().err
+        assert shown(examples / "hardened.yaml") in capsys.readouterr().err
 
 
 def test_a_local_policy_file_wins_over_a_bundled_one(staged, tmp_path, monkeypatch, capsys):
@@ -161,3 +172,15 @@ def test_a_local_policy_file_wins_over_a_bundled_one(staged, tmp_path, monkeypat
     assert run_cli(staged, "run", "policies/naive.yaml") == 0
     captured = capsys.readouterr()
     assert "Caught: 0 session(s)" in captured.out and "bundled" not in captured.err
+
+
+def test_suggest_json_is_json_when_there_is_nothing_to_suggest(staged, capsys):
+    assert run_cli(staged, "suggest", "refined", "--format", "json") == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["exemptions"] == []
+
+
+def test_the_bundled_cases_pair_with_a_relative_path_to_a_bundled_policy(staged, monkeypatch, capsys):
+    monkeypatch.chdir(POLICIES.parent)
+    assert run_cli(staged, "run", "policies/refined.yaml", "--no-ingest") == 0
+    assert "Lets 4 of 4 routine calls through" in capsys.readouterr().out

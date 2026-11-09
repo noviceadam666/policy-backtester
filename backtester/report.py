@@ -322,7 +322,7 @@ def render_suggestion(suggestion, diff: PolicyDiff, redacted: bool = True) -> st
         lines.append("  none")
     for e in suggestion.exemptions:
         lines.append(f"  {e.rule_id:{width}s}  {job_label(e.job, redacted)} ({e.job.kind}, {e.job.profile}),"
-                     f" {e.runs_hit} of {e.job.completed_runs} completed runs" + (f", in {e.workdir}" if e.workdir else ""))
+                     f" {e.runs_hit} of {e.job.completed_runs} completed runs" + (f", in {_segment(e.workdir, redacted)}" if e.workdir else ""))
         lines += [f"  {'':{width}s}    {_segment(segment, redacted)}" for segment in e.segments]
     lines.append("Left for a human" + ("" if suggestion.for_review else ": none"))
     for r in suggestion.for_review:
@@ -339,7 +339,7 @@ def suggestion_to_json(suggestion, diff: PolicyDiff, policy_yaml: str | None, re
     return {
         "exemptions": [
             {"rule": e.rule_id, "job": job_label(e.job, redacted), "kind": e.job.kind, "profile": e.job.profile,
-             "runs_hit": e.runs_hit, "completed_runs": e.job.completed_runs, "workdir": e.workdir,
+             "runs_hit": e.runs_hit, "completed_runs": e.job.completed_runs, "workdir": _segment(e.workdir, redacted) if e.workdir else e.workdir,
              "commands": [_segment(segment, redacted) for segment in e.segments]}
             for e in suggestion.exemptions
         ],

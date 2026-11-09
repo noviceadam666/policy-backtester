@@ -68,7 +68,7 @@ def load_policy(path: Path) -> Policy:
     try:
         # ruamel.yaml, not PyYAML: it's the parser Hermes core ships, and it rejects duplicate keys.
         data = YAML(typ="safe", pure=True).load(Path(path).read_text())
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise PolicyError(f"can't read policy {path}: {exc}") from exc
     except YAMLError as exc:
         raise PolicyError(f"{path} isn't valid YAML: {exc}") from exc

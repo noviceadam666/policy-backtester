@@ -1,5 +1,5 @@
 name: policy-backtester
-version: 0.5.1
+version: 0.5.2
 description: "A test harness for Hermes guardrails: what a rule would break, and what it would miss, on your agents' real work. Then shadow and enforce it."
 author: Novice Adam
 requires_hermes: ">=0.22.5"
@@ -10,7 +10,8 @@ provides_middleware: []
 config_schema:
   mode:
     type: string
-    choices: [off, shadow, enforce]
+    # Quoted: Hermes reads manifests as YAML 1.1, where a bare off is the boolean false.
+    choices: ["off", "shadow", "enforce"]
     default: "off"
     label: Live mode
     description: "off does nothing; shadow logs what the promoted policy would do; enforce blocks or asks. Set it with hermes backtest shadow / enforce / off, which backtest the policy first."

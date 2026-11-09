@@ -3,6 +3,8 @@
 import argparse
 import json
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -215,3 +217,107 @@ def test_enforce_applies_args_rules_to_non_terminal_tools(live):
     assert guard(tool_name="kanban_comment", args={"task_id": "t_1", "body": "done"}) is None
     [row] = decisions(live.home())
     assert row["tool"] == "kanban_comment" and row["rules"] == ["no-secrets-on-cards"]
+
+
+def test_enforce_fails_closed_when_the_hash_setting_is_blank(live):
+    guard = promote(live, REFINED, "enforce")
+    live.set("policy_sha256", "")
+    blocked = guard(tool_name="terminal", args={"command": "ls"})
+    assert blocked["action"] == "block" and "no hash is recorded" in blocked["message"]
+    live.set("mode", "shadow")
+    assert guard(tool_name="terminal", args={"command": "ls"}) is None
+
+
+def test_enforce_keeps_its_verdict_when_the_args_cant_be_logged(live):
+    path = live.home() / "ask.yaml"
+    path.write_text("rules:\n  - id: ask-push\n    tool: terminal\n    command: 'git\\s+push'\n    action: approve\n    message: Pushing needs a human.\n")
+    guard = promote(live, path, "enforce")
+    # Middleware can hand the hook values JSON can't hold; the verdict must stay approve, not turn into a block.
+    verdict = guard(tool_name="terminal", args={"command": "git push origin main", "extra": object()})
+    assert verdict["action"] == "approve"
+
+
+def test_hand_edited_log_lines_that_arent_records_are_skipped(fleet, ops, live, capsys):
+    assert cli(fleet, live, "shadow", str(REFINED), "--since", "all") == 0
+    with open(ops.home / "backtest" / "promotions.jsonl", "a") as f:
+        f.write('[1, 2]\n"x"\n')
+    with open(ops.home / "backtest" / "decisions.jsonl", "a") as f:
+        f.write("7\n")
+    assert len(promotions(ops.home)) == 1
+    assert cli(fleet, live, "log") == 0
+    assert cli(fleet, live, "status") == 0
+
+
+class OrderedSettings(MemorySettings):
+    def __init__(self, home, profile):
+        super().__init__(home, profile)
+        self.writes = []
+
+    def set(self, key, value):
+        self.writes.append(key)
+        super().set(key, value)
+
+
+def test_into_shadow_the_mode_is_written_first_so_a_call_between_writes_is_only_watched(fleet, ops):
+    live = OrderedSettings(ops.home, "demo-ops")
+    assert cli(fleet, live, "shadow", str(REFINED), "--since", "all") == 0
+    assert live.writes == ["mode", "policy", "policy_sha256"]
+    live.writes.clear()
+    assert cli(fleet, live, "enforce", "--since", "all") == 0
+    assert live.writes == ["policy", "policy_sha256", "mode"]
+
+
+def test_promote_redacts_kanban_titles(fleet, ops, live, capsys):
+    sid = ops.session(source="kanban")
+    ops.db.execute(
+        "INSERT INTO session_admissions (admission_id, request_id, target_session_id, status, outcome) VALUES ('k', ?, ?, 'terminal', 'completed')",
+        ('kanban:["acme-board","t_9",1]', sid),
+    )
+    ops.call(sid, "terminal", {"command": "rm -rf ./build"})
+    assert cli(fleet, live, "shadow", str(NAIVE), "--since", "all") == 0
+    out = capsys.readouterr().out
+    assert "kanban task t_9" in out and "acme-board" not in out
+
+
+def test_the_manifest_mode_choices_are_strings_in_yaml_1_1():
+    from ruamel.yaml import YAML
+
+    yaml = YAML(typ="safe", pure=True)
+    yaml.version = (1, 1)
+    manifest = yaml.load((Path(__file__).resolve().parent.parent / "plugin.yaml").read_text())
+    assert manifest["config_schema"]["mode"]["choices"] == ["off", "shadow", "enforce"]
+
+
+def test_demo_keep_refuses_a_folder_it_already_used(capsys, tmp_path):
+    assert run_demo(tmp_path / "demo") == 0
+    capsys.readouterr()
+    assert run_demo(tmp_path / "demo") == 1
+    assert "--keep needs a new or empty folder" in capsys.readouterr().err
+
+
+def test_a_long_script_through_a_heredoc_is_decided_well_inside_the_hook_timeout(tmp_path):
+    # Hermes blocks a hook that runs past 30 s, even in shadow. An 800 KB script took 28 s here before 0.5.2, when
+    # each match scanned every segment; it takes about 3 s now. A child process, because a hung test can't be stopped.
+    script = f"""
+import sys, time
+sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r})
+from pathlib import Path
+from backtester.live import LiveGuard, MemorySettings, install_policy
+from backtester.policy import load_policy
+home = Path({str(tmp_path)!r})
+policy_file = Path({str(POLICIES.parent / "examples" / "hardened.yaml")!r})
+policy = load_policy(policy_file)
+settings = MemorySettings(home, "ops")
+settings.set("policy", str(install_policy(home, policy_file, policy)))
+settings.set("policy_sha256", policy.hash)
+settings.set("mode", "shadow")
+guard = LiveGuard(settings.get, settings.home, settings.profile)
+body = 'cat "$f" | head -n 5 > out/*.log\\nrm -rf "$tmp"/build/* && tail -n 2 ${{LOG}}\\n'
+command = "cat > /workspace/app/gen.py <<'EOF'\\n" + body * (800_000 // len(body)) + "EOF"
+start = time.perf_counter()
+assert guard("terminal", {{"command": command, "workdir": "/workspace/app"}}) is None
+print(time.perf_counter() - start)
+"""
+    done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert float(done.stdout) < 15

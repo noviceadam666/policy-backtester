@@ -88,7 +88,7 @@ def check_call(policy: Policy, tool: str, args: dict, profile: str | None = None
 def load_cases(path: Path) -> list[Case]:
     try:
         data = YAML(typ="safe", pure=True).load(Path(path).read_text())
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise PolicyError(f"can't read cases {path}: {exc}") from exc
     except YAMLError as exc:
         raise PolicyError(f"{path} isn't valid YAML: {exc}") from exc

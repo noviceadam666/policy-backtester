@@ -272,3 +272,17 @@ def test_cli_says_when_there_is_nothing_to_suggest(fleet, capsys):
     stage_story(fleet.profile("demo"))
     assert run_cli(fleet, "suggest", str(POLICIES / "refined.yaml")) == 0
     assert "Nothing to suggest: refined.yaml breaks no jobs that ran" in capsys.readouterr().out
+
+
+def test_the_report_masks_a_home_folder_unless_asked(fleet, capsys):
+    profile = fleet.profile("demo")
+    for _ in range(2):
+        profile.cron_run("j1", "clean", ["rm -rf ./cache/*"], workdir="/Users/adam/acme-client/repo")
+    profile.write_cron_files()
+    assert run_cli(fleet, "suggest", str(POLICIES / "naive.yaml")) == 0
+    assert "completed runs, in ~/acme-client/repo" in capsys.readouterr().out
+    assert run_cli(fleet, "suggest", str(POLICIES / "naive.yaml"), "--format", "json", "--no-ingest") == 0
+    [exemption] = json.loads(capsys.readouterr().out)["exemptions"]
+    assert exemption["workdir"] == "~/acme-client/repo"
+    assert run_cli(fleet, "suggest", str(POLICIES / "naive.yaml"), "--format", "json", "--no-ingest", "--no-redact") == 0
+    assert json.loads(capsys.readouterr().out)["exemptions"][0]["workdir"] == "/Users/adam/acme-client/repo"

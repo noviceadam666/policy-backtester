@@ -4,7 +4,8 @@
 rules:
   - id: no-recursive-delete
     tool: terminal
-    command: '(^|[\s;&|(`])(rm\s(?:[^;&|\n]*\s)?(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(\s|$)|find\s[^;&|\n]*\s-(delete|exec\s+rm)(\s|$))'
+    # Each gap stops at the next rm or find, whose own match covers the rest of the line.
+    command: '(^|[\s;&|(`])(rm\s(?:(?:(?!\brm\s)[^;&|\n])*\s)?(-(?=[a-zA-Z]*[rR])[a-zA-Z]++|--recursive)(\s|$)|find\s(?:(?!\bfind\s)[^;&|\n])*\s-(delete|exec\s+rm)(\s|$))'
     unless:
       - command: '^\s*rm\s+-rf\s+\./cache/\*\s*$'
         workdir: /workspace/ops-repo
@@ -12,7 +13,9 @@ rules:
     message: Recursive deletes are blocked.
   - id: no-force-push
     tool: terminal
-    command: '(^|[\s;&|(`])git\s[^;&|\n]*\bpush\s[^;&|\n]*?(?<=\s)(-[a-zA-Z]*f[a-zA-Z]*|--force(-with-lease)?(=\S*)?|\+[\w./-]+)(\s|$)'
+    # Each gap stops at the next git, whose own match covers what follows, and (?>...) commits to the first push:
+    # a line of repeated words can't make it try every pairing.
+    command: '(^|[\s;&|(`])git\s(?>(?:(?!\bgit\s)[^;&|\n])*?\bpush\s)(?:(?!\bgit\s)[^;&|\n])*?(?<=\s)(-[a-zA-Z]*f[a-zA-Z]*|--force(-with-lease)?(=\S*)?|\+[\w./-]+)(\s|$)'
     unless_command: '^\s*git\s+push\s+(-f|--force)\s+origin\s+scratch/[\w./-]+\s*$'
     action: block
     message: Force-push is blocked.
@@ -30,12 +33,12 @@ rules:
     if_unresolved: approve
   - id: ask-secret-searches
     tool: terminal
-    command: '(?i)(^|[\s;&|(`])(grep|egrep|rg|ag|ack)\s[^;&|\n]*(api[_-]?key|secret|token|passw(or)?d|private[ _-]?key|AKIA)'
+    command: '(?i)(^|[\s;&|(`])(grep|egrep|rg|ag|ack)\s(?:(?!\b(?:grep|egrep|rg|ag|ack)\s)[^;&|\n])*(api[_-]?key|secret|token|passw(or)?d|private[ _-]?key|AKIA)'
     action: approve
     message: Searching files for secrets needs a human.
   - id: no-shell-uploads
     tool: terminal
-    command: '(curl|wget)\s(?:[^|;&]*\s)?(-d|--data|-F|--form|-T|--upload-file|--post-data|--post-file)'
+    command: '(curl|wget)\s(?:(?:(?!(?:curl|wget)\s)[^|;&\n]|\\\n)*\s)?(-d|--data|-F|--form|-T|--upload-file|--post-data|--post-file)'
     action: block
     message: Uploads from the shell are blocked.
   - id: no-raw-sockets

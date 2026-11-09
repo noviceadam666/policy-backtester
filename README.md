@@ -11,11 +11,11 @@ hermes -p ops backtest try refined
 On a synthetic profile named `ops`, that prints:
 
 ```text
-Trying refined.yaml (sha256 946d0ca6e5f5) on ops, last 30d: 22 tool calls in 10 sessions
+Trying refined.yaml (sha256 e104ed0778cf) on ops, last 30d: 22 tool calls in 10 sessions
 
 Would break   0 job(s). Ran untouched: nightly-cleanup, release-job, ops-check
 Would catch   3 session(s)
-  2026-10-26 01:37  oneshot  block  no-rm-rf  terminal: rm -rf /sandbox-data/old-builds
+  2026-10-26 01:37  oneshot  block  no-secret-reads, no-shell-uploads  read_file: .../config/vendor-api.yaml  (+1 more call(s))
   ...
 Would miss    11 of 27 known calls it should stop, and lets 4 of 4 routine ones through (refined.yaml: each checked, none run)
   force flag after the branch (known gap)
@@ -35,10 +35,11 @@ plain YAML when you want them.
 agent that writes and runs its own code can get past them. Use it to roll guardrails out without breaking jobs
 that work, alongside Hermes's own approvals and a sandboxed terminal.
 
-So far: on a sandbox profile with four cron jobs, under enforce from Nov 7 to Nov 8 with v0.3 of this plugin,
-10 of 10 job runs completed with nothing blocked, including `rm -rf ./cache/*` and a force push to a scratch branch. A
-staged request to send an API config to a vendor was blocked in 3 of 3 tries. One over-block: an `ls` that named
-the secret file.
+So far: on a sandbox profile with four cron jobs, under enforce since Nov 7 (v0.3 of this plugin, then 0.5.0 from
+Nov 8 and 0.5.1 from Nov 9 08:00 MST), 18 of 18 job runs completed with nothing blocked, including `rm -rf
+./cache/*` and a force push to a scratch branch. A staged request to send an API config to a vendor was blocked in
+3 of 3 tries, and an agent asked to switch its own guard off tried and was blocked. One over-block: an `ls` that
+named the secret file.
 
 ## Install, and try it in a minute with no keys
 
@@ -51,7 +52,8 @@ hermes backtest demo
 Hermes scans a plugin before it installs it. This one's policies, tests and README quote the commands it
 exists to catch (`rm -rf`, `curl -F`, `.env`), so the scan says `caution` and prints
 `Decision: BLOCKED ... Use --force to override.` That line isn't the end: in a terminal, the next one asks
-`Install anyway? Only continue if you trust the source. [y/N]`. Read the findings, then answer `y`. The
+`Install anyway? Only continue if you trust the source. [y/N]`. Read the findings, then answer `y`. It then asks
+`Enable now? [y/N]`; either answer is fine, since the next line enables it. The
 prompt only appears in a real terminal, so piping `y` into the install doesn't answer it, and the install
 fails. To install without a terminal, as in CI, use `--force --enable`:
 
@@ -109,11 +111,13 @@ where you are wins. Two stricter starting points, `examples/strict.yaml` and `ex
 the same way. They're examples, not presets: backtest and shadow them on your own history before you trust
 one.
 
-`try`, `run`, `diff`, `suggest` and `ingest` read the profile you run them in, and update the index first
-unless you pass `--no-ingest`. `--profile NAME` (repeatable) picks others, and `--all-profiles` reads every
-profile. `check` reads no history. `--since 7d` or `--until 2026-11-06` changes the window, `--format json`
-gives a report, and `--aggregate` gives counts only, which hides job names as well as commands and titles.
-Output is redacted by default; `--no-redact` shows raw commands and titles.
+`try`, `run`, `diff`, `suggest` and `ingest` read the profile you run them in, and all but `ingest` update the
+index first unless you pass `--no-ingest`. `try` reads only that profile. On `run`, `diff`, `suggest` and `ingest`,
+`--profile NAME` (repeatable) picks others, a name that isn't a profile is an error, and `--all-profiles` reads
+every profile. `check` reads no history. `--since 7d` changes the window; on `run`, `diff` and `suggest`, `--until
+2026-11-06` ends it and `--format json` gives a report. `run --aggregate` gives counts only, which hides job names
+as well as commands and titles. Output is redacted by default, with a home folder shown as `~`; `--no-redact`
+shows raw commands and titles.
 
 ### Jobs it can't vouch for
 
@@ -165,7 +169,8 @@ FILE` it checks a YAML list of calls, each with the action it should get:
 
 `check` exits 3 when any case gets a different action. A case marked `known_miss` is a gap the policy is known
 to have: it's listed every time but doesn't fail the run, and the report says when a policy starts catching it.
-`cases/refined.yaml` ships with the plugin and works from any folder, like the policies. It's 31 calls: what
+`cases/refined.yaml` (in the repo, `fixtures/cases/refined.yaml`) ships with the plugin and works from any folder,
+like the policies. It's 31 calls: what
 `refined.yaml` is for, plus bypass attempts from a zero-knowledge user test. `refined.yaml` gets 20 right and has
 11 known misses: force flags it doesn't expect (`push origin main --force`, `git -c x=1 push -f`,
 `push origin +main`), recursive deletes it doesn't spell (`rm -r -f`, `rm -fr`, `find -delete`), `grep -r
@@ -223,9 +228,9 @@ can't switch the guard off:
 - **guard-commands** blocks a terminal command that runs this plugin's `off`, `shadow` or `enforce`, disables
   or removes the plugin, or sets plugin settings with `hermes config set plugins...`. `log`, `status`, `run`
   and the rest stay open.
-- **guard-files** blocks `write_file`, `patch` and terminal commands that name a profile's `config.yaml` or
-  its `backtest/` folder (the promoted policy, the decision and promotion logs, the index), under this Hermes
-  root.
+- **guard-files** blocks `write_file`, `patch` (in a V4A patch, the files its headers name) and terminal commands
+  that name a profile's `config.yaml` or its `backtest/` folder (the promoted policy, the decision and promotion
+  logs, the index), under this Hermes root.
 
 They're in every backtest too, as rows of the rules table, so a job that does one of these shows up as a job
 the policy would break before enforce stops it. A policy can't exempt them, and `suggest` leaves such a job
@@ -357,8 +362,17 @@ have stopped 2 Kanban tasks. Shadow it before you enforce it.
   can't tell, but a parent directory still reads as a different path. Treat a clean backtest as evidence, not
   proof.
 - Shadow never blocks on its own decision, but Hermes blocks any hook that runs past 30 seconds, and Python can't
-  interrupt a regex once it starts. Keep your patterns free of nested repeats such as `(a+)+`, which can take
-  minutes on one long command. The built-in rules decide a command with 2,000 options in milliseconds.
+  interrupt a regex once it starts: a slow pattern holds the whole Hermes process until it finishes, then Hermes
+  skips the hook and blocks every tool call for a minute. Keep your patterns free of nested repeats such as
+  `(a+)+`, which can take minutes on one long command, and stop a gap like `[^;&|\n]*` at the next word that
+  starts the rule, as the bundled ones do, or a line that repeats that word is quadratic. The built-in rules decide a command with 2,000 options in milliseconds, and an
+  800 KB script written through a heredoc takes about 1 second with `refined` and 3 with `examples/hardened.yaml`
+  (Mac mini, 0.5.2; before 0.5.2 the hardened example took 28).
+- `approve` hands a call to Hermes's approval gate, which fails closed by default. A profile with
+  `approvals.mode: off`, yolo on, or cron or single-query runs set to approve lets an `approve` through with no
+  prompt. Use `block` for a call that must stop.
+- When another plugin's `pre_tool_call` rewrites a call's arguments, Hermes applies the rewrite after every hook
+  has seen the original, so enforce checks the arguments the agent asked for.
 - Enforcement runs per profile: install and promote in each profile you guard. `--all-profiles` reads them all.
 - A backtest can't vouch for a job it never saw run; it names those jobs instead of counting them as safe.
 - Tested on Hermes v0.22.5, v0.22.7 and v0.23.0, including fresh v0.23.0 installs (`plugins install`, `enable`,

@@ -21,9 +21,11 @@ from __future__ import annotations
 import posixpath
 import re
 import shlex
+from bisect import bisect_right
 from collections.abc import Iterable, Iterator
 from fnmatch import fnmatchcase
 from functools import lru_cache
+from operator import itemgetter
 
 # Deliberately ignores quoting. Splitting inside a quoted string only makes a segment smaller, so
 # ``unless_command`` is less likely to match and the rule more likely to fire: the safe direction.
@@ -58,17 +60,25 @@ def segment_spans(command: str) -> list[tuple[int, int]]:
 
 
 def span_at(spans: list[tuple[int, int]], offset: int) -> tuple[int, int]:
-    for span in spans:
-        if span[0] <= offset <= span[1]:
-            return span
-    return spans[-1]
+    """The segment a match starting at ``offset`` belongs to.
+
+    A pattern like ``(^|[ ;&|])rm`` starts its match on the separator before the command, so an offset on a
+    separator belongs to the segment after it, never the one before: an exemption covers only the segment it
+    matches. Spans are in order and never overlap, so this bisects; the hook looks one up for every match.
+    """
+    i = bisect_right(spans, offset, key=itemgetter(0))
+    if i and offset < spans[i - 1][1]:
+        return spans[i - 1]
+    return spans[i] if i < len(spans) else spans[-1]
 
 
-def _tokens(segment: str) -> list[str]:
+@lru_cache(maxsize=1024)
+def _tokens(segment: str) -> tuple[str, ...]:
+    # Cached: every path rule reads every segment, and shlex builds a long word a character at a time.
     try:
-        return shlex.split(segment)
+        return tuple(shlex.split(segment))
     except ValueError:
-        return [t.strip(_QUOTES) for t in segment.split()]
+        return tuple(t.strip(_QUOTES) for t in segment.split())
 
 
 def _pieces(token: str) -> Iterator[str]:
@@ -154,6 +164,10 @@ def _same_component(word: str, glob: str) -> bool:
 
 
 def _could_meet(word: tuple[str, ...], glob: tuple[str, ...]) -> bool:
+    if len(word) + len(glob) > 256:
+        # Too deep to walk without running out of stack; saying it could is the safe answer.
+        return True
+
     @lru_cache(maxsize=None)
     def meet(i: int, j: int) -> bool:
         if i == len(word) and j == len(glob):

@@ -8,6 +8,7 @@ import pytest
 
 from backtester.check import check_cases, load_cases
 from backtester.cli import BREAKS_EXIT, dispatch, setup_parser
+from backtester.paths import shown
 from backtester.policy import PolicyError, load_policy
 
 POLICIES = Path(__file__).resolve().parent.parent / "policies"
@@ -57,7 +58,7 @@ def test_the_shipped_cases_pass_on_refined_with_its_known_misses(tmp_path, monke
     monkeypatch.chdir(tmp_path)
     assert run_cli(tmp_path, "check", "refined.yaml", "--cases", "cases/refined.yaml") == 0
     captured = capsys.readouterr()
-    assert "using the bundled" in captured.err and str(CASES) in captured.err
+    assert "using the bundled" in captured.err and shown(CASES) in captured.err
     assert "0 mismatch(es), 11 known miss(es)" in captured.out
 
 

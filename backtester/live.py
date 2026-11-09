@@ -24,7 +24,7 @@ from typing import Any, Callable
 from .evaluator import evaluate
 from .guard import with_guard
 from .ingest import _clean_args
-from .paths import root_of
+from .paths import root_of, shown
 from .policy import Policy, PolicyError, load_policy
 
 MODES = ("off", "shadow", "enforce")
@@ -50,9 +50,12 @@ def read_jsonl(path: Path) -> list[dict]:
     rows = []
     for line in path.read_text().splitlines():
         try:
-            rows.append(json.loads(line))
+            row = json.loads(line)
         except ValueError:
             continue
+        # A hand-edited line can be valid JSON and still not a record.
+        if isinstance(row, dict):
+            rows.append(row)
     return rows
 
 
@@ -140,18 +143,19 @@ class LiveGuard:
         args = args if isinstance(args, dict) else {}
         verdict = evaluate(policy, tool_name, args, self._profile())
         if verdict.hits:
-            record = {
-                "ts": time.time(), "mode": mode, "policy": policy.hash, "tool": tool_name, "action": verdict.action,
-                "rules": list(verdict.rule_ids), "task_id": task_id or None, "session_id": session_id or None,
-                "tool_call_id": tool_call_id or None, "args": json.loads(_clean_args(args)),
-            }
+            # The record is built inside the try too: args a log can't hold mustn't turn enforce's verdict into a block.
             try:
+                record = {
+                    "ts": time.time(), "mode": mode, "policy": policy.hash, "tool": tool_name, "action": verdict.action,
+                    "rules": list(verdict.rule_ids), "task_id": task_id or None, "session_id": session_id or None,
+                    "tool_call_id": tool_call_id or None, "args": json.loads(_clean_args(args)),
+                }
                 with self._lock:
                     _append(live_dir(self._home()) / DECISIONS, record)
             except Exception:
                 if mode == "shadow":
                     raise
-                # Enforce still returns its verdict when the log can't be written.
+                # Enforce still returns its verdict when the call can't be logged.
         return verdict
 
     def _log_failure(self, mode: str, action: str | None, exc: Exception, tool_name: str, args: Any, task_id: str,
@@ -176,7 +180,7 @@ class LiveGuard:
         try:
             stat = Path(path).stat()
         except OSError as exc:
-            raise PolicyError(f"can't read policy {path}: {exc.strerror or exc}") from exc
+            raise PolicyError(f"can't read policy {shown(path)}: {exc.strerror or exc}") from exc
         key = (str(path), stat.st_mtime_ns, stat.st_size, expected)
         if self._cached and self._cached[0] == key:
             return self._cached[1]
@@ -186,8 +190,11 @@ class LiveGuard:
 
 
 def check_promoted(path: Path, expected: str | None) -> Policy:
-    """Load a promoted policy copy, refusing one whose rules no longer hash to what was promoted."""
+    """Load a promoted policy copy, refusing one whose rules no longer hash to what was promoted, or one with no
+    hash on record to check (a hand edit can blank the setting)."""
+    if not expected:
+        raise PolicyError(f"no hash is recorded for the promoted policy {shown(path)}, so it can't be checked")
     policy = load_policy(path)
-    if expected and policy.hash != expected:
-        raise PolicyError(f"{path} changed after it was promoted: its rules hash to {policy.hash[:12]}, not {expected[:12]}")
+    if policy.hash != expected:
+        raise PolicyError(f"{shown(path)} changed after it was promoted: its rules hash to {policy.hash[:12]}, not {expected[:12]}")
     return policy

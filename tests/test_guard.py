@@ -102,6 +102,18 @@ def test_the_agent_cant_touch_the_guards_files(tool, target, workdir):
     assert verdict.action == "block" and "guard-files" in verdict.rule_ids
 
 
+@pytest.mark.parametrize("header", ["*** Update File", "*** Add File", "*** Delete File", "***Update  File"])
+def test_a_v4a_patch_cant_name_the_guards_files_either(header):
+    # The patch tool's V4A mode names its files only inside the patch body.
+    body = f"*** Begin Patch\n{header}: ~/.hermes/profiles/ops/config.yaml\n@@\n-mode: enforce\n+mode: off\n*** End Patch"
+    verdict = evaluate(GUARDED, "patch", {"mode": "patch", "patch": body}, "ops")
+    assert verdict.action == "block" and "guard-files" in verdict.rule_ids
+    moved = "*** Begin Patch\n*** Move File: notes.md -> ~/.hermes/profiles/ops/config.yaml\n*** End Patch"
+    assert evaluate(GUARDED, "patch", {"mode": "patch", "patch": moved}, "ops").action == "block"
+    harmless = "*** Begin Patch\n*** Update File: /workspace/app/main.py\n@@\n-a\n+b\n*** End Patch"
+    assert evaluate(GUARDED, "patch", {"mode": "patch", "patch": harmless}, "ops").action is None
+
+
 def test_other_config_files_are_fine():
     assert decide("sed -i s/a/b/ config.yaml", "/workspace/app").action is None
     assert decide("/workspace/app/config.yaml", tool="write_file").action is None
@@ -178,7 +190,7 @@ def test_history_commands_read_the_profile_youre_in(fleet, ops, live, capsys):
 def test_try_reports_both_sides_and_starts_shadow(fleet, ops, live, capsys):
     assert cli(fleet, live, "try", "refined", "--since", "all") == 0
     out = capsys.readouterr().out
-    assert "Trying refined.yaml (sha256 946d0ca6e5f5) on demo-ops, all history" in out
+    assert f"Trying refined.yaml (sha256 {load_policy(REFINED).hash[:12]}) on demo-ops, all history" in out
     assert "Would break   0 job(s). Ran untouched: nightly-cleanup, release-job, ops-check" in out
     assert "Would catch   3 session(s)" in out
     assert ("Would miss    11 of 27 known calls it should stop, and lets 4 of 4 routine ones through"
@@ -246,7 +258,7 @@ def test_status_says_when_the_settings_changed_outside_backtest(fleet, ops, live
     cli(fleet, live, "status")
     out = capsys.readouterr().out
     assert "Live on demo-ops: off" in out
-    assert "set enforce with sha256 946d0ca6e5f5: the settings were changed outside hermes backtest" in out
+    assert f"set enforce with sha256 {load_policy(REFINED).hash[:12]}: the settings were changed outside hermes backtest" in out
     cli(fleet, live, "off")
     capsys.readouterr()
     cli(fleet, live, "status")

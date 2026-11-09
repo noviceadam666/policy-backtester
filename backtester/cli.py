@@ -17,9 +17,9 @@ from .guard import with_guard
 from .index import open_index
 from .ingest import IngestSummary, ingest, scheduled_jobs
 from .live import MODES, check_promoted, decisions, install_policy, promotions, record_promotion
-from .paths import DEFAULT_PROFILE, default_index, default_root
+from .paths import DEFAULT_PROFILE, all_profiles, default_index, default_root, shown
 from .policy import Policy, PolicyError, load_policy
-from .report import (cant_vouch_lines, cant_vouch_names, describe_call, diff_to_json, render_brief, render_diff,
+from .report import (cant_vouch_lines, cant_vouch_names, describe_call, diff_to_json, job_label, render_brief, render_diff,
                      render_suggestion, render_table, suggestion_to_json, to_json)
 
 _RELATIVE_TIME = re.compile(r"^(\d+)([dh])$")
@@ -120,7 +120,7 @@ def dispatch(args: argparse.Namespace, live=None) -> int:
     root = (args.hermes_root or default_root()).expanduser()
     index_path = (args.index or default_index(root)).expanduser()
     try:
-        _scope(args, live)
+        _scope(args, live, root)
         if args.backtest_command == "status":
             return _cmd_status(args, root, index_path, live)
         if args.backtest_command in _LIVE_COMMANDS:
@@ -134,7 +134,7 @@ def dispatch(args: argparse.Namespace, live=None) -> int:
         return 1
 
 
-def _scope(args: argparse.Namespace, live) -> None:
+def _scope(args: argparse.Namespace, live, root: Path) -> None:
     """History commands read the profile they run in, unless given --profile or --all-profiles.
 
     Outside Hermes there's no profile to be in, so they read every one, as they did before 0.5.
@@ -146,6 +146,12 @@ def _scope(args: argparse.Namespace, live) -> None:
         raise ValueError("--profile and --all-profiles don't go together")
     if args.all_profiles:
         args.profile = None
+    elif args.profile:
+        # A typo would otherwise replay nothing and pass, even under --fail-on-break.
+        known = {p.name for p in all_profiles(root)}
+        unknown = sorted(set(args.profile) - known)
+        if unknown:
+            raise ValueError(f"no profile named {', '.join(unknown)} under {shown(root)} (hermes profile list shows them)")
     elif args.profile is None and live is not None:
         here = live.profile() or DEFAULT_PROFILE
         args.profile = [here]
@@ -164,7 +170,7 @@ def _hermes(profile: str) -> str:
 def _cmd_ingest(args: argparse.Namespace, root: Path, index_path: Path) -> int:
     summary = ingest(root, index_path, args.profile)
     if not summary.profiles:
-        print(f"backtest: no matching profile with a state.db under {root}", file=sys.stderr)
+        print(f"backtest: no matching profile with a state.db under {shown(root)}", file=sys.stderr)
         return 1
     _print_ingest(summary, index_path)
     return 1 if any(p.error for p in summary.profiles) else 0
@@ -176,7 +182,7 @@ def _print_ingest(summary: IngestSummary, index_path: Path) -> None:
             print(f"{row.profile:26s} FAILED: {row.error}")
         else:
             print(f"{row.profile:26s} {row.sessions:5d} sessions  {row.sessions_read:5d} read  {row.calls:6d} calls  +{row.new_calls}")
-    print(f"Index: {index_path}")
+    print(f"Index: {shown(index_path)}")
 
 
 def _refresh(args: argparse.Namespace, root: Path, index_path: Path, profiles: list[str] | None = None) -> None:
@@ -209,7 +215,7 @@ def policy_path(path: Path, kind: str = "policy") -> Path:
         for folder in folders:
             bundled = folder / candidate
             if bundled.is_file():
-                print(f"backtest: no {path} here, so using the bundled {bundled}", file=sys.stderr)
+                print(f"backtest: no {path} here, so using the bundled {shown(bundled)}", file=sys.stderr)
                 return bundled
     names = ", ".join(sorted(f.name for f in folders[0].glob("*.yaml")))
     if kind == "cases":
@@ -224,8 +230,9 @@ def _paired_cases(args: argparse.Namespace, policy_file: Path) -> Path | None:
     examples build on refined, so they get its cases."""
     if getattr(args, "cases", None) is not None:
         return policy_path(args.cases, "cases")
-    paired = BUNDLED_CASES / ("refined.yaml" if policy_file.parent == EXAMPLES else policy_file.name)
-    return paired if policy_file.parent in (BUNDLED, EXAMPLES) and paired.is_file() else None
+    folder = policy_file.resolve().parent
+    paired = BUNDLED_CASES / ("refined.yaml" if folder == EXAMPLES else policy_file.name)
+    return paired if folder in (BUNDLED, EXAMPLES) and paired.is_file() else None
 
 
 def _case_summary(policy: Policy, cases_file: Path | None):
@@ -313,7 +320,7 @@ def _cmd_suggest(args: argparse.Namespace, root: Path, index_path: Path) -> int:
     finally:
         index.close()
     redacted = not args.no_redact
-    if not before.would_break:
+    if not before.would_break and args.format != "json":
         print(f"Nothing to suggest: {args.policy.name} breaks no jobs that ran in this window.")
         print("\n".join(cant_vouch_lines(before)).lstrip("\n"))
         return _exit_code(args, False, before)
@@ -369,7 +376,7 @@ def _backtest_here(args: argparse.Namespace, root: Path, index_path: Path, live,
 
 def _problems(result: BacktestResult) -> tuple[list[str], list[str], list[str]]:
     """The jobs a policy would break, the jobs it can't vouch for, and the two as enforce's reasons to refuse."""
-    broken = [j.job_name or j.job_id for j in result.would_break]
+    broken = [job_label(j) for j in result.would_break]
     unvouched = cant_vouch_names(result)
     problems = [f"it would break {len(broken)} job(s)"] if broken else []
     if unvouched:
@@ -387,9 +394,14 @@ def _start(stage: str, source: Path, policy: Policy, result: BacktestResult, arg
     # Promoting the installed copy keeps the name the policy was first promoted under.
     name = next((p.get("source") for p in reversed(promotions(home)) if p.get("policy") == policy.hash and p.get("source")),
                 source.name) if already else source.name
+    # Every gateway process reads these on its next call, one at a time. Into shadow, the mode goes first, so a
+    # call that lands between the writes is only watched; into enforce, the policy shadow already ran is in place.
+    if stage == "shadow":
+        live.set("mode", stage)
     live.set("policy", str(installed))
     live.set("policy_sha256", policy.hash)
-    live.set("mode", stage)
+    if stage != "shadow":
+        live.set("mode", stage)
     record_promotion(home, {
         "stage": stage, "policy": policy.hash, "source": name, "profile": profile, "forced": forced,
         "window_since": _parse_time(args.since), "calls": result.calls_replayed, "caught": len(result.incidents),
@@ -407,7 +419,7 @@ def _cmd_promote(args: argparse.Namespace, root: Path, index_path: Path, live) -
     policy = load_policy(source)
     result = _backtest_here(args, root, index_path, live, with_guard(policy, root))
     broken, unvouched, problems = _problems(result)
-    print(f"Backtest on {profile}, {args.since}: {result.calls_replayed} calls, {len(result.incidents)} session(s) caught,"
+    print(f"Backtest on {profile}, {_window(args.since)}: {result.calls_replayed} calls, {len(result.incidents)} session(s) caught,"
           f" {len(broken)} job(s) would break" + (f" ({', '.join(broken)})" if broken else ""))
     if not result.calls_replayed:
         print(f"Warning: {profile} has no tool calls in this window, so this backtest checked nothing. A clean result here"
@@ -599,7 +611,7 @@ def _cmd_status(args: argparse.Namespace, root: Path, index_path: Path, live=Non
         if mode in MODES[1:]:
             _print_live_problem(live, mode)
     if not index_path.exists():
-        print(f"No index yet at {index_path}. Run: hermes backtest ingest")
+        print(f"No index yet at {shown(index_path)}. Run: {_hermes(live.profile()) if live is not None else 'hermes'} backtest ingest")
         return 0
     index = open_index(index_path)
     try:
@@ -618,7 +630,7 @@ def _cmd_status(args: argparse.Namespace, root: Path, index_path: Path, live=Non
     print(f"{'profile':26s} {'sessions':>8s} {'calls':>7s}  {'oldest session':16s}  {'newest call':16s}")
     for r in rows:
         print(f"{r['profile']:26s} {r['sessions']:8d} {r['calls']:7d}  {_day(r['oldest']):16s}  {_day(r['newest']):16s}")
-    print(f"Index: {index_path}")
+    print(f"Index: {shown(index_path)}")
     return 0
 
 

@@ -35,8 +35,8 @@ plain YAML when you want them.
 agent that writes and runs its own code can get past them. Use it to roll guardrails out without breaking jobs
 that work, alongside Hermes's own approvals and a sandboxed terminal.
 
-So far: on a sandbox profile with four cron jobs, under enforce since Nov 7 (v0.3 of this plugin, then 0.5.0 from
-Nov 8, 0.5.1 from Nov 9 08:00 MST and 0.5.2 from 12:26), all 20 job runs through Nov 9 17:30 MST completed with
+So far: on a test profile with four cron jobs, under enforce since Nov 7 (v0.3 of this plugin, then 0.5.0 from
+Nov 8, 0.5.1 from Nov 9 08:00 MST and 0.5.2 from 12:26), all 28 job runs through Nov 10 12:52 MST completed with
 nothing blocked, including `rm -rf ./cache/*` and a force push to a scratch branch. A staged request to send an API config to a vendor was blocked in
 3 of 3 tries, and an agent asked to switch its own guard off tried and was blocked. One over-block: an `ls` that
 named the secret file.

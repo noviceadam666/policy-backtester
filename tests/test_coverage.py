@@ -10,7 +10,7 @@ from backtester.cli import BREAKS_EXIT, UNVOUCHED_EXIT, dispatch, setup_parser
 from backtester.ingest import scheduled_jobs
 from backtester.live import LiveGuard, MemorySettings, decisions, promotions
 from backtester.report import span
-from fakehermes import stage_story
+from fakehermes import stage_night, stage_story
 
 POLICIES = Path(__file__).resolve().parent.parent / "policies"
 NAIVE, REFINED = POLICIES / "naive.yaml", POLICIES / "refined.yaml"
@@ -48,6 +48,14 @@ def ops(fleet):
 def test_scheduled_jobs_counts_enabled_unfinished_jobs_even_without_history(fleet, new_app):
     assert [(j.profile, j.name) for j in scheduled_jobs(fleet.root)] == [("relnotes", "cache-cleanup"), ("relnotes", "changelog-push")]
     assert scheduled_jobs(fleet.root, ["other"]) == []
+
+
+def test_scheduled_jobs_skips_jobs_hermes_wont_fire(fleet):
+    # Hermes's scheduler skips a job with either pause marker, even while it is still enabled.
+    define_jobs(fleet.root / "profiles" / "half", {"id": "a", "name": "runs", "enabled": True, "state": "scheduled"},
+                {"id": "b", "name": "state-paused", "enabled": True, "state": "paused"},
+                {"id": "c", "name": "paused-at", "enabled": True, "state": "scheduled", "paused_at": "2026-11-01T00:00:00"})
+    assert [j.name for j in scheduled_jobs(fleet.root)] == ["runs"]
 
 
 def test_run_names_jobs_it_cant_vouch_for_and_fails_ci(fleet, ops, new_app, capsys):
@@ -99,9 +107,14 @@ def test_shadow_warns_and_enforce_refuses_until_each_job_ran(fleet, ops, new_app
     assert cli(fleet, live, "enforce") == 1
     out = capsys.readouterr().out
     assert "Not enforcing: it can't vouch for 2 scheduled job(s)" in out
-    assert "Keep it in shadow until each job has completed a run" in out and live.get("mode") == "shadow"
+    assert "shadow hasn't seen cache-cleanup, changelog-push complete a run since it started" in out
+    assert "Keep it in shadow until hermes -p relnotes backtest log says ready" in out and live.get("mode") == "shadow"
     assert cli(fleet, live, "enforce", "--force") == 0
-    assert promotions(new_app)[-1]["cant_vouch"] == ["cache-cleanup", "changelog-push"] and promotions(new_app)[-1]["forced"]
+    record = promotions(new_app)[-1]
+    assert record["cant_vouch"] == ["cache-cleanup", "changelog-push"] and record["forced"]
+    assert record["shadow_since"] == promotions(new_app)[0]["ts"]
+    assert record["overrode"][0].startswith("it can't vouch for 2 scheduled job(s)")
+    assert any(r.startswith("shadow hasn't seen a tool call") for r in record["overrode"])
 
 
 def test_log_lists_scheduled_jobs_that_have_not_run(fleet, ops, new_app, capsys):
@@ -122,8 +135,9 @@ def test_short_windows_read_in_minutes_and_hours():
 @pytest.fixture
 def enforced(fleet, ops):
     live = MemorySettings(ops.home, "demo-ops")
-    cli(fleet, live, "shadow", str(REFINED), "--since", "all")
-    cli(fleet, live, "enforce", "--since", "all")
+    assert cli(fleet, live, "shadow", str(REFINED), "--since", "all") == 0
+    stage_night(ops)
+    assert cli(fleet, live, "enforce", "--since", "all") == 0
     return live
 
 

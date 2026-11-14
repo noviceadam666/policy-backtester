@@ -90,10 +90,11 @@ hermes -p ops backtest off
   that) of the profile you run it in. It checks known calls from `--cases FILE`, or the bundled cases for a
   bundled policy, and starts shadow unless you pass `--no-shadow`. It never replaces a policy in enforce: it
   says so and leaves it running.
-- **log** ends with a verdict while shadow is on. Not ready means shadow would have stopped a job. Not seen yet
-  means a job hasn't completed a run since shadow started. Otherwise it says ready.
-- **enforce** still checks for itself. It refuses unless the policy ran in shadow, breaks no jobs, and every
-  scheduled job has completed a run in its 30-day window (see Promotion below).
+- **log** ends with a verdict while shadow is on. Not ready means shadow would have stopped a call in a job
+  (its subagents and Kanban tasks count) or in a session Hermes didn't save, or couldn't check a call. Not seen
+  yet means a job hasn't completed a run since shadow started. Otherwise it says ready.
+- **enforce** still checks for itself. It refuses unless `log` says ready for that exact policy, its backtest
+  breaks no jobs, and every scheduled job has completed a run in its 30-day window (see Promotion below).
 
 ### The tools under it
 
@@ -122,7 +123,7 @@ shows raw commands and titles.
 ### Jobs it can't vouch for
 
 A backtest can only say a policy breaks no jobs for the jobs it saw run. So every `run`, `diff`, `suggest`,
-`shadow` and `enforce` also reads each profile's `cron/jobs.json` and names any enabled job with no completed
+`shadow` and `enforce` also reads each profile's `cron/jobs.json` and names any enabled job that isn't paused and has no completed
 run in the window under "Can't vouch for" (`cant_vouch_jobs` in JSON). A new app's jobs are all there until
 they've run once. A window with no tool calls at all says it checked nothing. Kanban tasks are one-off work
 with no schedule to read, so only cron jobs are listed.
@@ -197,9 +198,14 @@ the window, they exit 4 instead: the backtest can't vouch for that job, so a cle
 hooks per profile. Both backtest the policy on that profile's history first and print the result.
 
 - **shadow** starts even if the policy would break a job, since it changes nothing, and says so.
-- **enforce** refuses unless that exact policy (by hash) has run in shadow on this profile, its backtest
-  breaks no jobs, and every scheduled job on the profile has completed a run in the window. Keep a new app in
-  shadow until each job has run once. `--force` overrides, and the override is recorded.
+- **enforce** refuses unless that exact policy (by hash) is in shadow on this profile and `log` says ready.
+  Since shadow started, it must have stopped no call in a scheduled run (a run's subagents and Kanban tasks
+  count) or in a session Hermes didn't save, logged no call it couldn't check, and seen each scheduled job
+  complete a run that started after it did. It must also have seen at least one tool call, which is all a
+  profile with no scheduled jobs needs. Its backtest must also break no jobs, and every scheduled job must have
+  completed a run in the window. Keep a policy in shadow until `log` says ready. `backtest off`, shadowing
+  another policy, or shadowing it again after a call it couldn't check starts the wait again. `--force`
+  overrides, and the override is recorded with its reasons.
 - Both warn when the profile has no tool calls in the window, since the backtest then checked nothing.
 - The policy is copied into `<profile>/backtest/policies/<hash>.yaml`, so editing your source file can't change
   what runs. The hook refuses a copy whose rules changed after promotion.

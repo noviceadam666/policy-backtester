@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 import uuid
 from pathlib import Path
 
@@ -159,3 +160,21 @@ def stage_story(profile: Profile) -> dict[str, str]:
         sessions[spec["key"]] = sid
     profile.write_cron_files()
     return sessions
+
+
+def stage_night(profile: Profile, guard=None) -> list:
+    """Another night of the story's jobs, each run now and completed, as Hermes would run them once shadow is on.
+
+    ``guard``, when given, sees each job's calls as the live hook would, and its verdicts come back in order.
+    """
+    story = json.loads(STORY.read_text())
+    profile.clock = max(profile.clock, time.time())
+    verdicts = []
+    for job in story["jobs"]:
+        profile.cron_run(job["id"], job["name"], job["commands"], workdir=job.get("workdir"))
+        execution = profile.executions[-1][0]
+        for command in job["commands"] if guard is not None else ():
+            args = {"command": command, **({"workdir": job["workdir"]} if job.get("workdir") else {})}
+            verdicts.append(guard(tool_name="terminal", args=args, task_id=f"cron:{job['id']}:{execution}"))
+    profile.write_cron_files()
+    return verdicts

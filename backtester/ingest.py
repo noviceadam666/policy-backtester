@@ -326,16 +326,19 @@ def _read_jobs(home: Path) -> list[dict]:
 
 
 def scheduled_jobs(root: Path, only: list[str] | None = None) -> list[ScheduledJob]:
-    """The cron jobs each profile has scheduled now: enabled in ``cron/jobs.json`` and not finished.
+    """The cron jobs each profile has scheduled now: enabled in ``cron/jobs.json``, not paused and not finished.
 
-    A profile counts even before it has a ``state.db``, since a new app's jobs are the ones with no
-    history. Kanban tasks are one-off work with no schedule to read, so only cron jobs are listed.
+    Paused means either of Hermes's pause markers, ``state: paused`` or a ``paused_at`` time: its scheduler
+    won't fire a job with one even while ``enabled`` is still true. A profile counts even before it has a
+    ``state.db``, since a new app's jobs are the ones with no history. Kanban tasks are one-off work with no
+    schedule to read, so only cron jobs are listed.
     """
     return [
         ScheduledJob("cron", profile.name, str(job["id"]), job.get("name"))
         for profile in all_profiles(root, only)
         for job in _read_jobs(profile.home)
-        if job.get("enabled", True) is not False and job.get("state") != "completed"
+        if bool(job.get("enabled", True)) and str(job.get("state") or "").strip() not in ("completed", "paused")
+        and not job.get("paused_at")
     ]
 
 
@@ -377,7 +380,8 @@ class _CronLookup:
         match = _CRON_SESSION_ID.match(session["id"])
         job_id = match.group(1) if match else session["id"]
         outcome = "completed" if session["end_reason"] == "cron_complete" else "unknown"
-        return JobLink("cron", job_id, self._name(job_id, session), None, outcome)
+        # The run is this session, so the subagents that inherit its link count as the same run.
+        return JobLink("cron", job_id, self._name(job_id, session), session["id"], outcome)
 
 
 class _KanbanLookup:

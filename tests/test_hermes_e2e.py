@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -229,6 +230,13 @@ def test_promotion_writes_settings_through_hermes_and_the_hook_follows(plugin_ho
     assert "mode: shadow" in config and "policy_sha256:" in config
     assert dispatch_through_hermes(plugin_home, UPLOAD) == [None]
 
+    early = backtest(plugin_home, "--hermes-root", str(fleet.root), "enforce")
+    assert early.returncode == 1 and "shadow hasn't seen a tool call since it started" in early.stdout
+    # This profile has no scheduled jobs, so one call after shadow started is enough for log to say ready. The
+    # session the hook saw ("s") is the chat it belongs to; until Hermes saves it, its would-block holds enforce.
+    default = fleet.profile("default")
+    default.clock = time.time() + 1
+    default.call(default.session(sid="s", title="the chat the hook saw"), "terminal", {"command": "ls"})
     enforce = backtest(plugin_home, "--hermes-root", str(fleet.root), "enforce")
     assert enforce.returncode == 0, enforce.stderr + enforce.stdout
     assert dispatch_through_hermes(plugin_home, UPLOAD)[0].startswith("Secret files are off limits.")

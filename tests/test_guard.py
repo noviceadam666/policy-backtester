@@ -18,7 +18,7 @@ from backtester.ingest import ingest, scheduled_jobs
 from backtester.live import LiveGuard, MemorySettings, decisions, promotions
 from backtester.policy import PolicyError, load_policy, parse_policy
 from backtester.suggest import suggest
-from fakehermes import stage_story
+from fakehermes import stage_night, stage_story
 
 REPO = Path(__file__).resolve().parent.parent
 REFINED, NAIVE = REPO / "policies" / "refined.yaml", REPO / "policies" / "naive.yaml"
@@ -150,8 +150,9 @@ def test_the_live_hook_guards_itself_in_both_modes(fleet, ops, live, capsys):
     switch_off = {"command": "hermes -p demo-ops backtest off"}
     assert guard(tool_name="terminal", args=switch_off) is None and decisions(ops.home) == []
     assert cli(fleet, live, "shadow", str(REFINED), "--since", "all") == 0
-    assert guard(tool_name="terminal", args=switch_off) is None
+    assert guard(tool_name="terminal", args=switch_off, session_id=ops.session(title="tune the guard")) is None
     assert decisions(ops.home)[-1]["rules"] == ["guard-commands"]
+    stage_night(ops)
     assert cli(fleet, live, "enforce", "--since", "all") == 0
     blocked = guard(tool_name="terminal", args={"command": f"sed -i s/enforce/off/ {ops.home}/config.yaml"})
     assert blocked["action"] == "block" and "guard-files" in blocked["message"]
@@ -211,8 +212,9 @@ def test_try_says_what_breaks_and_never_replaces_enforce(fleet, ops, live, capsy
     assert "Would miss    not checked" in out and "backtest suggest naive --out fixed.yaml" in out
     assert "Nothing started (--no-shadow)" in out and live.get("mode") is None
 
-    cli(fleet, live, "shadow", str(REFINED), "--since", "all")
-    cli(fleet, live, "enforce", "--since", "all")
+    assert cli(fleet, live, "shadow", str(REFINED), "--since", "all") == 0
+    stage_night(ops)
+    assert cli(fleet, live, "enforce", "--since", "all") == 0
     capsys.readouterr()
     assert cli(fleet, live, "try", "naive", "--since", "all") == 0
     assert "Enforce is already on for demo-ops" in capsys.readouterr().out
@@ -222,11 +224,19 @@ def test_try_says_what_breaks_and_never_replaces_enforce(fleet, ops, live, capsy
 def test_log_says_whether_shadow_is_ready_to_enforce(fleet, ops, live, capsys):
     cli(fleet, live, "try", "refined", "--since", "all")
     capsys.readouterr()
-    assert cli(fleet, live, "log", "--since", "all", "--no-ingest") == 0
+    # The verdict counts from when shadow started, whatever window --since shows: runs from before it never count.
+    assert cli(fleet, live, "log", "--since", "all") == 0
+    out = capsys.readouterr().out
+    assert "nightly-cleanup: 2 completed run(s), untouched" in out
+    assert "Not seen yet: nightly-cleanup, ops-check, release-job haven't completed a run since shadow started" in out
+    stage_night(ops)
+    assert cli(fleet, live, "log", "--since", "all") == 0
     assert "Ready: every scheduled job ran untouched in shadow." in capsys.readouterr().out
     LiveGuard(live.get, live.home, live.profile)(tool_name="terminal", args={"command": "rm -rf /srv"}, task_id="cron:aaa111:x")
     cli(fleet, live, "log", "--since", "all", "--no-ingest")
     assert "Not ready: shadow would have stopped nightly-cleanup." in capsys.readouterr().out
+    assert cli(fleet, live, "enforce", "--since", "all") == 1
+    assert "Not enforcing: shadow would have stopped nightly-cleanup. Fix the policy" in capsys.readouterr().out
 
 
 def test_run_checks_known_cases_on_both_sides(fleet, ops, live, capsys):
@@ -249,8 +259,9 @@ def test_the_case_summary_counts_both_sides():
 
 
 def test_status_says_when_the_settings_changed_outside_backtest(fleet, ops, live, capsys):
-    cli(fleet, live, "shadow", str(REFINED), "--since", "all")
-    cli(fleet, live, "enforce", "--since", "all")
+    assert cli(fleet, live, "shadow", str(REFINED), "--since", "all") == 0
+    stage_night(ops)
+    assert cli(fleet, live, "enforce", "--since", "all") == 0
     capsys.readouterr()
     assert cli(fleet, live, "status") == 0
     assert "changed outside" not in capsys.readouterr().out

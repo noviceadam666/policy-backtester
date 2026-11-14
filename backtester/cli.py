@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sqlite3
 import sys
@@ -11,6 +12,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NamedTuple
 
 from .engine import BacktestResult, diff_results, run_backtest
 from .guard import with_guard
@@ -78,7 +80,7 @@ def setup_parser(parser: argparse.ArgumentParser) -> None:
     check.add_argument("--format", choices=("table", "json"), default="table")
 
     for stage, text in (("shadow", "Log what a policy would do on this profile's live calls, changing nothing"),
-                        ("enforce", "Enforce a policy on this profile: it must have run in shadow, break no jobs, and have seen each scheduled job run")):
+                        ("enforce", "Enforce a policy on this profile: shadow must have seen each scheduled job run untouched, and its backtest must break no jobs")):
         promote = sub.add_parser(stage, help=text)
         promote.add_argument("policy", type=Path, nargs="?" if stage == "enforce" else None,
                              help="policy file" + (" (default: the one in shadow)" if stage == "enforce" else ""))
@@ -385,7 +387,7 @@ def _problems(result: BacktestResult) -> tuple[list[str], list[str], list[str]]:
 
 
 def _start(stage: str, source: Path, policy: Policy, result: BacktestResult, args: argparse.Namespace, live,
-           forced: bool, via: str | None = None) -> str:
+           forced: bool, via: str | None = None, extra: dict | None = None) -> str:
     """Install the policy in this profile, switch the mode and record the promotion. Returns its name."""
     home, profile = Path(live.home()), live.profile()
     broken, unvouched, _ = _problems(result)
@@ -405,7 +407,7 @@ def _start(stage: str, source: Path, policy: Policy, result: BacktestResult, arg
     record_promotion(home, {
         "stage": stage, "policy": policy.hash, "source": name, "profile": profile, "forced": forced,
         "window_since": _parse_time(args.since), "calls": result.calls_replayed, "caught": len(result.incidents),
-        "would_break": broken, "cant_vouch": unvouched, **({"via": via} if via else {}),
+        "would_break": broken, "cant_vouch": unvouched, **({"via": via} if via else {}), **(extra or {}),
     })
     return name
 
@@ -427,17 +429,35 @@ def _cmd_promote(args: argparse.Namespace, root: Path, index_path: Path, live) -
     if unvouched:
         print(f"Can't vouch for {len(unvouched)} scheduled job(s) on {profile}: {', '.join(unvouched)}. None has completed a run"
               " in this window, so the backtest never saw them work.")
-    if stage == "enforce" and not any(p.get("stage") == "shadow" and p.get("policy") == policy.hash for p in promotions(home)):
-        problems.append("it hasn't run in shadow on this profile")
+    review, extra = None, {}
+    if stage == "enforce":
+        current = _stretch(promotions(home))
+        # Promoting the enforced policy again (to restore an edited copy, say) already passed shadow the first time.
+        again = (bool(current) and current[-1]["stage"] == "enforce" and current[-1].get("policy") == policy.hash
+                 and live.get("mode", "off") == "enforce" and live.get("policy_sha256", None) == policy.hash)
+        if again:
+            extra.update({"again": True, "forced_before": any(p.get("forced") for p in current)})
+        else:
+            review = _shadow_review(root, index_path, live, policy.hash)
+            problems += review.reasons
+            extra["shadow_since"] = review.since
     if problems and stage == "enforce" and not args.force:
-        advice = " Keep it in shadow until each job has completed a run, then enforce again." if unvouched else ""
+        if review is not None and review.reasons:
+            advice = review.advice
+        else:
+            advice = " Keep it in shadow until each job has completed a run, then enforce again." if unvouched else ""
         print(f"Not enforcing: {' and '.join(problems)}.{advice} Pass --force to enforce anyway (recorded).")
         return 1
+    if problems and stage == "enforce":
+        extra["overrode"] = problems
     if (broken or unvouched) and stage == "shadow":
         until = "it breaks no jobs" + (" and each scheduled job has completed a run" if unvouched else "")
         print(f"Shadow changes nothing, so it starts anyway; enforce will refuse this policy until {until}.")
-    name = _start(stage, source, policy, result, args, live, bool(problems))
+    name = _start(stage, source, policy, result, args, live, bool(problems), extra=extra)
     print(f"{stage.capitalize()} is on for {profile}: {name} (sha256 {policy.hash[:12]}), from the next tool call.")
+    if stage == "shadow":
+        print(f"Enforce waits until {_hermes(profile)} backtest log says ready: each scheduled job has completed a run"
+              " under shadow, untouched.")
     return 0
 
 
@@ -480,7 +500,7 @@ def _cmd_try(args: argparse.Namespace, root: Path, index_path: Path, live) -> in
     steps = [(f"suggest {args.policy} --out fixed.yaml", "propose exemptions for the jobs it breaks")] if broken else []
     if shadowing:
         steps += [("log", "what shadow would have stopped, and whether each job ran untouched"),
-                  ("enforce", "once log shows every job running untouched; it checks again first")]
+                  ("enforce", "once log says ready; it checks again first")]
     steps.append((f"run {args.policy}", "the full report"))
     width = max(len(step) for step, _ in steps)
     print("Next")
@@ -507,13 +527,21 @@ def _cmd_off(args: argparse.Namespace, root: Path, index_path: Path, live) -> in
 def _cmd_log(args: argparse.Namespace, root: Path, index_path: Path, live) -> int:
     home, profile = Path(live.home()), live.profile()
     mode, sha = live.get("mode", "off"), live.get("policy_sha256", None)
-    starts = [p for p in promotions(home) if p.get("stage") in ("shadow", "enforce")]
-    since = _parse_time(args.since) if args.since else (starts[-1]["ts"] if starts else None)
-    rows = [d for d in decisions(home) if since is None or d.get("ts", 0) >= since]
+    every = promotions(home)
+    starts = [p for p in every if p.get("stage") in ("shadow", "enforce")]
+    # By default, since the mode last changed: re-promoting the same policy doesn't restart the count.
+    current = _stretch(every)
+    if current and current[0]["stage"] != "off":
+        default = _ts(current[0])
+    else:
+        default = _ts(starts[-1]) if starts else None
+    since = _parse_time(args.since) if args.since else (default if default is None or math.isfinite(default) else None)
+    rows = [d for d in decisions(home) if since is None or _ts(d) >= since]
     source = next((p.get("source") for p in reversed(starts) if p.get("policy") == sha), None)
     print(f"Profile {profile} · mode {mode}" + (f" · {source or 'policy'} (sha256 {sha[:12]})" if sha else ""))
     _refresh(args, root, index_path, [profile])
     jobs, checked = _jobs_since(index_path, profile, since)
+    links, known = _job_links(index_path, profile)
     stopped = [d for d in rows if d.get("action")]
     enforced = sum(1 for d in stopped if d.get("mode") == "enforce")
     counts = [f"{enforced} were stopped"] if enforced or mode == "enforce" else []
@@ -528,9 +556,9 @@ def _cmd_log(args: argparse.Namespace, root: Path, index_path: Path, live) -> in
               f" Run: hermes -p {profile} backtest status")
     stops_by_job: dict[str, int] = {}
     for d in stopped:
-        job_id = _cron_job(d.get("task_id"))
-        if job_id:
-            stops_by_job[job_id] = stops_by_job.get(job_id, 0) + 1
+        job = _job_of(d, links)
+        if job and job[0] == "cron":
+            stops_by_job[job[1]] = stops_by_job.get(job[1], 0) + 1
     never_ran = {j.job_id: j.name for j in scheduled_jobs(root, [profile]) if j.job_id not in jobs}
     if jobs or never_ran:
         print("Scheduled jobs")
@@ -541,14 +569,19 @@ def _cmd_log(args: argparse.Namespace, root: Path, index_path: Path, live) -> in
             stops = stops_by_job.get(job_id, 0)
             print(f"  {name or job_id}: no completed run since {_when(since)}" + (f", {stops} stop(s)" if stops else ""))
     if mode == "shadow":
-        print(_readiness(profile, jobs, never_ran, stops_by_job, checked))
+        print(_shadow_review(root, index_path, live, sha).verdict)
     redacted = not args.no_redact
     print("Decisions")
     if not rows:
         print("  none")
     for d in rows:
-        job_id = _cron_job(d.get("task_id"))
-        where = (jobs.get(job_id, (never_ran.get(job_id),))[0] or f"cron {job_id}") if job_id else "chat"
+        job = _job_of(d, links)
+        if job is None:
+            where = "chat" if d.get("session_id") in known else "unsaved session"
+        elif job[0] == "cron":
+            where = jobs.get(job[1], (never_ran.get(job[1]),))[0] or job[2] or f"cron {job[1]}"
+        else:
+            where = job_label(SimpleNamespace(kind=job[0], job_id=job[1], job_name=job[2]), redacted)
         shadow = d.get("mode") == "shadow"
         verb = {"block": "would block" if shadow else "blocked", "approve": "would ask" if shadow else "asked"}.get(
             d.get("action"), "unchecked" if d.get("error") else "noted")
@@ -558,22 +591,141 @@ def _cmd_log(args: argparse.Namespace, root: Path, index_path: Path, live) -> in
     return 0
 
 
-def _readiness(profile: str, jobs: dict, never_ran: dict, stops_by_job: dict[str, int], checked: int) -> str:
-    """What the shadow log says about enforcing: a job it would stop, a job it hasn't seen, or neither."""
-    names = {**{job_id: name for job_id, (name, _) in jobs.items()}, **never_ran}
-    stopped = sorted(names.get(j) or j for j, n in stops_by_job.items() if n and j in names)
-    unseen = sorted(name or job_id for job_id, name in never_ran.items())
+class _Review(NamedTuple):
+    """What shadow says about enforcing a policy: when it started, enforce's reasons to refuse, log's verdict."""
+
+    since: float | None
+    reasons: list[str]
+    verdict: str
+    advice: str
+
+
+def _shadow_review(root: Path, index_path: Path, live, sha: str | None) -> _Review:
+    """Whether shadow has cleared this policy for enforce. ``log`` prints the verdict and ``enforce`` refuses on its
+    reasons, so the two can't disagree.
+
+    Shadow counts from the first of the unbroken shadow promotions of this policy at the end of the record, so time
+    with the guard off, or with another policy in shadow, never counts. Since then, shadow must have stopped no call
+    in a scheduled run (its subagents' and Kanban tasks' included) or in a session the history doesn't hold, logged
+    no call it couldn't check, seen at least one call, and seen each job Hermes will run complete a run that started
+    after it did.
+    """
+    home, profile = Path(live.home()), live.profile()
     cmd = _hermes(profile)
+    every = promotions(home)
+    current = _stretch(every)
+    mode, setting = live.get("mode", "off"), live.get("policy_sha256", None)
+    last = current[-1] if current else None
+    if (last is None and mode != "off") or (last is not None and not (
+            mode == last["stage"] and (mode == "off" or setting == last.get("policy")))):
+        reason = "the live settings were changed outside hermes backtest"
+        return _Review(None, [reason], f"Not ready: {reason}. See {cmd} backtest status.",
+                       f" Promote it again with {cmd} backtest shadow POLICY, then wait for log to say ready.")
+    if last is None or last["stage"] != "shadow" or last.get("policy") != sha:
+        ever = any(p.get("stage") == "shadow" and p.get("policy") == sha for p in every)
+        reason = "it isn't in shadow on this profile now" if ever else "it hasn't run in shadow on this profile"
+        return _Review(None, [reason], f"Not ready: {reason}.",
+                       f" Shadow it first ({cmd} backtest shadow POLICY), then enforce once {cmd} backtest log says ready.")
+    since, latest = _ts(current[0]), _ts(current[-1])
+    if not (math.isfinite(since) and math.isfinite(latest)):
+        reason = "its shadow promotion has no readable time"
+        return _Review(None, [reason], f"Not ready: {reason}.", f" Shadow it again ({cmd} backtest shadow POLICY).")
+    logged = decisions(home)
+    # Shadowing the policy again reinstalls its copy, which is how a call shadow couldn't check gets fixed. Shadow
+    # didn't watch those calls, so after one the wait starts over from that promotion.
+    if any(d.get("mode") == "shadow" and d.get("error") and since <= _ts(d) < latest for d in logged):
+        since = latest
+    started = _when(since)
+    rows = [d for d in logged if _ts(d) >= since]
+    if any(d.get("mode") != "shadow" for d in rows):
+        reason = "the live mode was set to enforce by hand while shadow ran"
+        return _Review(None, [reason], f"Not ready: {reason}. See {cmd} backtest status.",
+                       f" Shadow it again ({cmd} backtest shadow POLICY) and wait for log to say ready.")
+    jobs, checked = _jobs_since(index_path, profile, since)
+    links, known = _job_links(index_path, profile)
+    scheduled = {j.job_id: j.name for j in scheduled_jobs(root, [profile])}
+    unchecked = [d for d in rows if d.get("error")]
+    stops = [(d, _job_of(d, links)) for d in rows if d.get("action") and d.get("policy") == sha]
+    stopped = sorted({_job_name(job, scheduled, jobs) for _, job in stops if job})
+    unsaved = [d for d, job in stops if job is None and d.get("session_id") not in known]
+    unseen = sorted(name or job_id for job_id, name in scheduled.items() if job_id not in jobs)
+    reasons, verdicts = [], []
     if stopped:
-        return (f"Not ready: shadow would have stopped {', '.join(stopped)}. Fix the policy first"
-                f" ({cmd} backtest suggest POLICY proposes exemptions).")
+        reasons.append(f"shadow would have stopped {', '.join(stopped)}")
+        verdicts.append(f"Not ready: shadow would have stopped {', '.join(stopped)}. Fix the policy first"
+                        f" ({cmd} backtest suggest POLICY proposes exemptions).")
+    if unchecked:
+        reasons.append(f"shadow couldn't check {len(unchecked)} call(s)")
+        verdicts.append(f"Not ready: shadow couldn't check {len(unchecked)} call(s) since it started ({started}):"
+                        f" {unchecked[-1]['error']}. Fix what {cmd} backtest status reports, then shadow it again;"
+                        " the wait starts over.")
+    if unsaved:
+        reasons.append(f"shadow would have stopped {len(unsaved)} call(s) in a session the history doesn't hold")
+        verdicts.append(f"Not ready: shadow would have stopped {len(unsaved)} call(s) in a session the history doesn't"
+                        " hold, so it can't tell whether a job made them. Look again once Hermes has saved it; a"
+                        " session Hermes never saves keeps it here.")
     if unseen:
-        return f"Not seen yet: {', '.join(unseen)} hasn't completed a run since shadow started. Wait for it before you enforce."
+        reasons.append(f"shadow hasn't seen {', '.join(unseen)} complete a run since it started ({started})")
+        verdicts.append(f"Not seen yet: {', '.join(unseen)} {'hasn' if len(unseen) == 1 else 'haven'}'t completed a run"
+                        f" since shadow started ({started}). Wait for it before you enforce.")
     if not checked:
-        return "Nothing to review yet: no tool calls since shadow started. Use the profile, then look again."
-    if not jobs:
-        return f"No scheduled jobs here. Review the decisions below, then: {cmd} backtest enforce"
-    return f"Ready: every scheduled job ran untouched in shadow. Next: {cmd} backtest enforce (it checks the backtest again first)"
+        reasons.append(f"shadow hasn't seen a tool call since it started ({started})")
+        verdicts.append(f"Nothing to review yet: no tool calls since shadow started ({started}). Use the profile, then look again.")
+    if scheduled:
+        verdicts.append(f"Ready: every scheduled job ran untouched in shadow. Next: {cmd} backtest enforce (it checks the backtest again first)")
+    else:
+        verdicts.append(f"Ready: no scheduled jobs here, and shadow has seen {checked} call(s) since it started."
+                        f" Review the decisions below, then: {cmd} backtest enforce")
+    if stopped:
+        advice = f" Fix the policy, then shadow the fixed one ({cmd} backtest suggest POLICY proposes exemptions)."
+    elif unchecked:
+        advice = f" Fix what {cmd} backtest status reports, then shadow it again ({cmd} backtest shadow POLICY)."
+    else:
+        advice = f" Keep it in shadow until {cmd} backtest log says ready, then enforce again."
+    return _Review(since, reasons, verdicts[0], advice)
+
+
+def _stretch(records: list[dict]) -> list[dict]:
+    """The promotions since the mode last changed: the unbroken run of same-stage, same-policy records at the end."""
+    run: list[dict] = []
+    for p in reversed([p for p in records if p.get("stage") in MODES]):
+        if run and (p.get("stage"), p.get("policy")) != (run[0].get("stage"), run[0].get("policy")):
+            break
+        run.insert(0, p)
+    return run
+
+
+def _ts(record: dict) -> float:
+    """A logged record's time. One a hand edit left unreadable counts as the newest, so it is never left out."""
+    ts = record.get("ts")
+    return float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else math.inf
+
+
+def _job_links(index_path: Path, profile: str) -> tuple[dict[str, tuple[str, str, str | None]], set[str]]:
+    """Each indexed session that belongs to a scheduled run, as (kind, job id, job name), and every indexed session.
+    The links catch the calls the hook's task_id doesn't tie to a job: a run's subagents and Kanban tasks."""
+    index = open_index(index_path)
+    try:
+        rows = index.execute("SELECT session_id, job_kind, job_id, job_name FROM sessions WHERE profile=?", [profile]).fetchall()
+    finally:
+        index.close()
+    return ({r["session_id"]: (r["job_kind"], r["job_id"], r["job_name"]) for r in rows if r["job_kind"]},
+            {r["session_id"] for r in rows})
+
+
+def _job_of(decision: dict, links: dict[str, tuple[str, str, str | None]]) -> tuple[str, str, str | None] | None:
+    """The scheduled job a logged decision belongs to, or None for chat."""
+    job_id = _cron_job(decision.get("task_id"))
+    if job_id:
+        return ("cron", job_id, None)
+    return links.get(decision.get("session_id"))
+
+
+def _job_name(job: tuple[str, str, str | None], scheduled: dict, jobs: dict) -> str:
+    kind, job_id, name = job
+    if kind == "cron":
+        return scheduled.get(job_id) or jobs.get(job_id, (None,))[0] or name or f"cron {job_id}"
+    return job_label(SimpleNamespace(kind=kind, job_id=job_id, job_name=name))
 
 
 def _cron_job(task_id: str | None) -> str | None:
@@ -584,15 +736,19 @@ def _cron_job(task_id: str | None) -> str | None:
 
 
 def _jobs_since(index_path: Path, profile: str, since: float | None) -> tuple[dict[str, tuple[str | None, int]], int]:
+    """Completed cron runs per job, counting a run from its first session, so a run that started before ``since``
+    doesn't count because one of its subagents started after."""
     index = open_index(index_path)
     try:
-        clause, params = ("AND s.started_at >= ?", [since]) if since is not None else ("", [])
+        clause, params = ("WHERE first_start >= ?", [since]) if since is not None else ("", [])
         jobs = {
             r["job_id"]: (r["job_name"], r["runs"])
             for r in index.execute(
-                f"""SELECT s.job_id, MAX(s.job_name) AS job_name, COUNT(DISTINCT COALESCE(s.run_id, s.session_id)) AS runs
-                    FROM sessions s WHERE s.profile=? AND s.job_kind='cron' AND s.run_outcome='completed' {clause}
-                    GROUP BY s.job_id""",
+                f"""SELECT job_id, MAX(job_name) AS job_name, COUNT(*) AS runs FROM (
+                        SELECT s.job_id, MAX(s.job_name) AS job_name, MIN(s.started_at) AS first_start
+                        FROM sessions s WHERE s.profile=? AND s.job_kind='cron' AND s.run_outcome='completed'
+                        GROUP BY s.job_id, COALESCE(s.run_id, s.session_id))
+                    {clause} GROUP BY job_id""",
                 [profile, *params],
             )
         }
@@ -679,7 +835,11 @@ def _day(ts: float | None) -> str:
 
 
 def _when(ts: float | None) -> str:
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else "the start"
+    if not ts:
+        return "the start"
+    if not isinstance(ts, (int, float)) or not math.isfinite(ts):
+        return "an unreadable time"
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
 def _parse_time(value: str | None) -> float | None:
